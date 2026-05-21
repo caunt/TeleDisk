@@ -1,5 +1,6 @@
 using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using TeleDisk;
@@ -13,6 +14,7 @@ public sealed class NbdMountIntegrationTests
     private const string Hostname = "host.testcontainers.internal";
     private const int ConnectionRetries = 20;
     private const int RetryDelaySeconds = 1;
+    private const int ServerLogLineLimit = 200;
 
     [Theory]
     [InlineData("printf 'alpha' | qemu-io -f raw -c \"write 0 5\" nbd://host.testcontainers.internal:10809 && qemu-io -f raw -c \"read -P 0x61 0 1\" -c \"read -P 0x6c 1 1\" nbd://host.testcontainers.internal:10809")]
@@ -60,7 +62,10 @@ public sealed class NbdMountIntegrationTests
             string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(BotTokenVariable)),
             $"Set {BotTokenVariable} to run integration tests.");
 
+        var hostLogs = new List<string>();
         var hostApplicationBuilder = Host.CreateApplicationBuilder();
+        hostApplicationBuilder.Logging.ClearProviders();
+        hostApplicationBuilder.Logging.AddProvider(new ListLoggerProvider(hostLogs));
         hostApplicationBuilder.Services.AddTeleDisk();
         using var host = hostApplicationBuilder.Build();
         using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromMinutes(3));
@@ -87,7 +92,15 @@ public sealed class NbdMountIntegrationTests
             if (exitCode is not 0)
             {
                 var (stdout, stderr) = await container.GetLogsAsync(DateTime.MinValue, DateTime.MaxValue, false, cancellationTokenSource.Token);
-                Assert.Fail($"Command failed with exit code {exitCode}.\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+                var serverLogs = string.Join(
+                    Environment.NewLine,
+                    hostLogs
+                        .TakeLast(ServerLogLineLimit));
+                Assert.Fail(
+                    $"Command failed with exit code {exitCode}." +
+                    $"\nSTDOUT:\n{stdout}" +
+                    $"\nSTDERR:\n{stderr}" +
+                    $"\nNBD SERVER LOGS (last {ServerLogLineLimit} lines):\n{serverLogs}");
             }
         }
         finally
@@ -100,5 +113,40 @@ public sealed class NbdMountIntegrationTests
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
         return $"for attempt in $(seq 1 {ConnectionRetries}); do {command} && exit 0; if [ \"$attempt\" -eq \"{ConnectionRetries}\" ]; then exit 1; fi; sleep {RetryDelaySeconds}; done";
+    }
+
+    private sealed class ListLoggerProvider(List<string> logs) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => new ListLogger(categoryName, logs);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class ListLogger(string categoryName, List<string> logs) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull
+            => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel is not LogLevel.None;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var message = formatter(state, exception);
+            if (string.IsNullOrWhiteSpace(message) && exception is null)
+            {
+                return;
+            }
+
+            var exceptionText = exception is null ? string.Empty : $" {exception}";
+            logs.Add($"[{DateTime.UtcNow:O}] {categoryName} {logLevel}: {message}{exceptionText}");
+        }
     }
 }
