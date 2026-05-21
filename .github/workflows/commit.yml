@@ -1,0 +1,20 @@
+name: commit
+
+on: push
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet publish src/TeleDisk.csproj -c Release /t:PublishContainer -p:ContainerRegistry=ghcr.io -p:ContainerRepository=${{ github.repository_owner }}/teledisk -p:ContainerImageTag=latest "-p:ContainerRuntimeIdentifiers=linux-x64;linux-arm64"
+        env:
+          DOTNET_CONTAINER_REGISTRY_UNAME: ${{ github.actor }}
+          DOTNET_CONTAINER_REGISTRY_PWORD: ${{ secrets.GITHUB_TOKEN }}
