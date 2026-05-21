@@ -78,7 +78,6 @@ public sealed class NbdMountIntegrationTests
 
             await using var container = new ContainerBuilder("ubuntu:latest")
                 .WithPrivileged(true)
-                .WithAutoRemove(true)
                 .WithExtraHost(Hostname, "host-gateway")
                 .WithEntrypoint("bash", "-lc")
                 .WithCommand(script)
