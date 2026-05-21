@@ -21,18 +21,51 @@ internal sealed class TelegramBlobStore(TelegramBotClient telegramBotClient, IHt
     internal Task SetIndexFileIdAsync(string fileId, CancellationToken cancellationToken) =>
         SetBotDescriptionAsync($"{IndexDescriptionPrefix}{fileId}", cancellationToken);
 
-    internal async Task<string> UploadFileAsync(byte[] bytes, string fileName, CancellationToken cancellationToken)
+    internal async Task<string> UploadFileAsync(ReadOnlyMemory<byte> payload, string fileName, CancellationToken cancellationToken)
     {
-        await using var stream = new MemoryStream(bytes);
+        await using var stream = new MemoryStream(payload.ToArray(), writable: false);
         var message = await telegramBotClient.SendDocument(StorageChatId, InputFile.FromStream(stream, fileName), cancellationToken: cancellationToken);
         return message.Document?.FileId ?? throw new InvalidOperationException("Telegram returned message without document.");
     }
 
-    internal async Task<byte[]> DownloadFileAsync(string fileId, CancellationToken cancellationToken)
+    internal async Task<byte[]> DownloadChunkOrZeroAsync(string? fileId, int chunkSizeBytes, CancellationToken cancellationToken)
     {
-        await using var stream = new MemoryStream();
-        await telegramBotClient.GetInfoAndDownloadFile(fileId, stream, cancellationToken);
-        return stream.ToArray();
+        if (string.IsNullOrWhiteSpace(fileId))
+        {
+            return new byte[chunkSizeBytes];
+        }
+
+        var destination = new byte[chunkSizeBytes];
+        await DownloadRangeAsync(fileId, 0, destination, cancellationToken);
+        return destination;
+    }
+
+    internal async Task DownloadRangeAsync(string fileId, int offset, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        var file = await telegramBotClient.GetFile(fileId, cancellationToken);
+        var fileUri = $"https://api.telegram.org/file/bot{telegramBotToken.Value}/{file.FilePath}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, fileUri);
+        request.Headers.Range = new(offset, offset + destination.Length - 1);
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        if (await responseStream.ReadAtLeastAsync(destination, destination.Length, false, cancellationToken) != destination.Length)
+        {
+            throw new InvalidOperationException("Unexpected file size.");
+        }
+    }
+
+    internal async Task<T?> DownloadJsonAsync<T>(string fileId, CancellationToken cancellationToken)
+    {
+        var file = await telegramBotClient.GetFile(fileId, cancellationToken);
+        await using var stream = await _httpClient.GetStreamAsync($"https://api.telegram.org/file/bot{telegramBotToken.Value}/{file.FilePath}", cancellationToken);
+        return await JsonSerializer.DeserializeAsync<T>(stream, cancellationToken: cancellationToken);
+    }
+
+    internal async Task<string> UploadJsonAsync<T>(T payload, string fileName, CancellationToken cancellationToken)
+    {
+        var content = JsonSerializer.SerializeToUtf8Bytes(payload);
+        return await UploadFileAsync(content, fileName, cancellationToken);
     }
 
     private async Task<string> GetBotDescriptionAsync(CancellationToken cancellationToken) =>
