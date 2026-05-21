@@ -268,7 +268,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     await HandleReadAsync(stream, handle, offset, length, cancellationToken);
                     break;
                 case NbdCommand.Write:
-                    await DrainAndReplyNotSupportedAsync(stream, handle, length, cancellationToken);
+                    await HandleWriteAsync(stream, handle, offset, length, cancellationToken);
                     break;
                 case NbdCommand.Disconnect:
                     await virtualDiskService.SaveAsync(cancellationToken);
@@ -302,6 +302,14 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
         await WriteReplyAsync(stream, handle, 0, cancellationToken);
         await stream.WriteAsync(readData, cancellationToken);
+    }
+
+    private async Task HandleWriteAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, CancellationToken cancellationToken)
+    {
+        var writeData = new byte[length];
+        await ReadExactlyAsync(stream, writeData, cancellationToken);
+        await virtualDiskService.WriteAsync(offset, writeData, cancellationToken);
+        await WriteReplyAsync(stream, handle, 0, cancellationToken);
     }
 
     private static async Task DrainAndReplyNotSupportedAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, int payloadLength, CancellationToken cancellationToken)
