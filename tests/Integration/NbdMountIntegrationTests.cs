@@ -11,6 +11,8 @@ public sealed class NbdMountIntegrationTests
 {
     private const string BotTokenVariable = "TELEGRAM_BOT_TOKEN";
     private const string Hostname = "host.testcontainers.internal";
+    private const int ConnectionRetries = 20;
+    private const int RetryDelaySeconds = 1;
 
     [Theory]
     [InlineData("printf 'alpha' | qemu-io -f raw -c \"write 0 5\" nbd://host.testcontainers.internal:10809 && qemu-io -f raw -c \"read -P 0x61 0 1\" -c \"read -P 0x6c 1 1\" nbd://host.testcontainers.internal:10809")]
@@ -71,7 +73,7 @@ public sealed class NbdMountIntegrationTests
                 "set -euo pipefail",
                 "apt-get update >/dev/null",
                 "apt-get install -y qemu-utils nbd-client >/dev/null",
-                command
+                BuildRetryCommand(command)
             ]);
 
             await using var container = new ContainerBuilder()
@@ -91,5 +93,11 @@ public sealed class NbdMountIntegrationTests
         {
             await host.StopAsync(cancellationTokenSource.Token);
         }
+    }
+
+    private static string BuildRetryCommand(string command)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+        return $"for attempt in $(seq 1 {ConnectionRetries}); do {command} && exit 0; if [ \"$attempt\" -eq \"{ConnectionRetries}\" ]; then exit 1; fi; sleep {RetryDelaySeconds}; done";
     }
 }
