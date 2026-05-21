@@ -19,7 +19,6 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const uint NbdErrorInvalidArgument = 22;
     private const uint NbdErrorNotSupported = 95;
     private const uint NbdFlagHasFlags = 1;
-    private const uint NbdFlagReadOnly = 1 << 1;
     private const uint NbdFlagSendFlush = 1 << 2;
     private const uint NbdFlagSendTrim = 1 << 5;
     private const uint NbdFlagSendWriteZeroes = 1 << 6;
@@ -169,7 +168,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     {
         var span = (stackalloc byte[10]);
         BinaryPrimitives.WriteUInt64BigEndian(span, unchecked((ulong)VirtualDiskLayout.CapacityBytes));
-        BinaryPrimitives.WriteUInt16BigEndian(span[8..], (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendTrim | NbdFlagSendWriteZeroes | NbdFlagSendCache | NbdFlagSendFastZero | NbdFlagSendBlockStatus | NbdFlagCanResize | NbdFlagReadOnly));
+        BinaryPrimitives.WriteUInt16BigEndian(span[8..], (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendTrim | NbdFlagSendWriteZeroes | NbdFlagSendCache | NbdFlagSendFastZero | NbdFlagSendBlockStatus | NbdFlagCanResize));
         stream.Write(span);
         return Task.CompletedTask;
     }
