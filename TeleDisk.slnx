@@ -4,5 +4,6 @@
   <Project Path="src/TeleDisk.Infrastructure/TeleDisk.Infrastructure.csproj" />
   <Project Path="src/TeleDisk.Transport/TeleDisk.Transport.csproj" />
   <Project Path="src/TeleDisk.Host/TeleDisk.Host.csproj" />
+  <Project Path="src/TeleDisk.Benchmarks/TeleDisk.Benchmarks.csproj" />
   <Project Path="tests/TeleDisk.Tests.csproj" />
 </Solution>
