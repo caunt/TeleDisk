@@ -5,12 +5,10 @@ namespace TeleDisk.Tests;
 
 public sealed class DependencyInjectionTests
 {
-    private const string TokenVariable = "TELEGRAM_BOT_TOKEN";
-
     [Fact]
-    public void AddTeleDisk_ShouldThrow_WhenTokenMissing() => WithToken(null, services =>
+    public void AddTeleDisk_ShouldThrow_WhenTokenMissing() => WithServices(services =>
     {
-        var act = () => services.AddTeleDisk();
+        var act = () => services.AddTeleDisk((string?)null);
         act.Should().Throw<InvalidOperationException>().WithMessage("*TELEGRAM_BOT_TOKEN*");
     });
 
@@ -32,27 +30,17 @@ public sealed class DependencyInjectionTests
 
     private static void WithProvider(string token, Action<ServiceProvider> assert)
     {
-        WithToken(token, services =>
+        WithServices(services =>
         {
-            services.AddTeleDisk();
+            services.AddTeleDisk(token);
             using var provider = services.BuildServiceProvider();
             assert(provider);
         });
     }
 
-    private static void WithToken(string? token, Action<ServiceCollection> assert)
+    private static void WithServices(Action<ServiceCollection> assert)
     {
-        var previousToken = Environment.GetEnvironmentVariable(TokenVariable);
-        Environment.SetEnvironmentVariable(TokenVariable, token);
         var services = new ServiceCollection();
-
-        try
-        {
-            assert(services);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(TokenVariable, previousToken);
-        }
+        assert(services);
     }
 }
