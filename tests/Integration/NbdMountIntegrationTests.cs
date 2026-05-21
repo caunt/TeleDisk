@@ -71,13 +71,12 @@ public sealed class NbdMountIntegrationTests
         {
             var script = string.Join(";", [
                 "set -euo pipefail",
-                "apt-get update >/dev/null",
-                "apt-get install -y qemu-utils nbd-client >/dev/null",
+                "apt-get update",
+                "apt-get install -y qemu-utils nbd-client",
                 BuildRetryCommand(command)
             ]);
 
-            await using var container = new ContainerBuilder()
-                .WithImage("ubuntu:latest")
+            await using var container = new ContainerBuilder("ubuntu:latest")
                 .WithPrivileged(true)
                 .WithAutoRemove(true)
                 .WithExtraHost(Hostname, "host-gateway")
@@ -87,7 +86,11 @@ public sealed class NbdMountIntegrationTests
 
             await container.StartAsync(cancellationTokenSource.Token);
             var exitCode = await container.GetExitCodeAsync(cancellationTokenSource.Token);
-            Assert.Equal(0, exitCode);
+            if (exitCode is not 0)
+            {
+                var (stdout, stderr) = await container.GetLogsAsync(DateTime.MinValue, DateTime.MaxValue, false, cancellationTokenSource.Token);
+                Assert.Fail($"Command failed with exit code {exitCode}.\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+            }
         }
         finally
         {
