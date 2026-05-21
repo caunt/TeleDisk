@@ -1,68 +1,41 @@
-using TeleDisk.Tests.NbdProtocol;
+using System.Reflection;
+using TeleDisk.Transport.Nbd;
 
 namespace TeleDisk.Tests.NbdProtocol.HandshakeOptions;
 
 public sealed class HandshakeOptionCatalogTests
 {
-    public static TheoryData<uint, bool, bool, bool> BehaviorCases => new()
-    {
-        { 1u, false, false, false },
-        { 2u, true, false, true },
-        { 3u, true, false, false },
-        { 4u, false, true, false },
-        { 5u, false, false, false },
-        { 6u, true, false, false },
-        { 7u, true, false, false },
-        { 8u, true, false, false },
-        { 9u, true, false, false },
-        { 10u, true, false, false },
-        { 11u, false, true, false }
-    };
+    private static readonly Type EndpointType = typeof(NbdEndpoint);
 
     [Theory]
-    [MemberData(nameof(BehaviorCases))]
-    public void ExposesExpectedFlags(uint code, bool acked, bool experimental, bool negotiationEnds)
+    [InlineData("NbdOptionExportName", 1u)]
+    [InlineData("NbdOptionAbort", 2u)]
+    [InlineData("NbdOptionList", 3u)]
+    [InlineData("NbdOptionPeekExport", 4u)]
+    [InlineData("NbdOptionStartTls", 5u)]
+    [InlineData("NbdOptionInfo", 6u)]
+    [InlineData("NbdOptionGo", 7u)]
+    [InlineData("NbdOptionStructuredReply", 8u)]
+    [InlineData("NbdOptionListMetaContext", 9u)]
+    [InlineData("NbdOptionSetMetaContext", 10u)]
+    [InlineData("NbdOptionExtendedHeaders", 11u)]
+    public void UsesExpectedNegotiationOptionCode(string constantName, uint expectedCode)
     {
-        var option = GetOption(code);
-        option.Acked.Should().Be(acked);
-        option.Experimental.Should().Be(experimental);
-        option.NegotiationEnds.Should().Be(negotiationEnds);
+        var field = EndpointType.GetField(constantName, BindingFlags.NonPublic | BindingFlags.Static);
+        field.Should().NotBeNull();
+        field!.GetRawConstantValue().Should().Be(expectedCode);
     }
 
     [Fact]
-    public void UsesUniqueCodes()
+    public void UsesUniqueNegotiationOptionCodes()
     {
-        var uniqueCodes = new HashSet<uint>
-        {
-            NbdProtocolCatalog.ExportName.Code,
-            NbdProtocolCatalog.Abort.Code,
-            NbdProtocolCatalog.List.Code,
-            NbdProtocolCatalog.PeekExport.Code,
-            NbdProtocolCatalog.StartTls.Code,
-            NbdProtocolCatalog.Info.Code,
-            NbdProtocolCatalog.Go.Code,
-            NbdProtocolCatalog.StructuredReply.Code,
-            NbdProtocolCatalog.ListMetaContext.Code,
-            NbdProtocolCatalog.SetMetaContext.Code,
-            NbdProtocolCatalog.ExtendedHeaders.Code
-        };
+        var optionCodes = EndpointType
+            .GetFields(BindingFlags.NonPublic | BindingFlags.Static)
+            .Where(static field => field.IsLiteral && field.FieldType == typeof(uint) && field.Name.StartsWith("NbdOption", StringComparison.Ordinal))
+            .Select(static field => (uint)(field.GetRawConstantValue() ?? 0u))
+            .OrderBy(static code => code)
+            .ToArray();
 
-        uniqueCodes.Should().HaveCount(11);
+        optionCodes.Should().Equal([1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u]);
     }
-
-    private static NbdProtocolCatalog.HandshakeOption GetOption(uint code) => code switch
-    {
-        1 => NbdProtocolCatalog.ExportName,
-        2 => NbdProtocolCatalog.Abort,
-        3 => NbdProtocolCatalog.List,
-        4 => NbdProtocolCatalog.PeekExport,
-        5 => NbdProtocolCatalog.StartTls,
-        6 => NbdProtocolCatalog.Info,
-        7 => NbdProtocolCatalog.Go,
-        8 => NbdProtocolCatalog.StructuredReply,
-        9 => NbdProtocolCatalog.ListMetaContext,
-        10 => NbdProtocolCatalog.SetMetaContext,
-        11 => NbdProtocolCatalog.ExtendedHeaders,
-        _ => throw new ArgumentOutOfRangeException(nameof(code), code, "Unsupported handshake option code")
-    };
 }
