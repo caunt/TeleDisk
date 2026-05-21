@@ -18,6 +18,9 @@ internal sealed class VirtualDiskService(TelegramBlobStore telegramBlobStore, IL
     internal async Task SaveAsync(CancellationToken cancellationToken) =>
         await (await GetDiskAsync(cancellationToken)).SaveAsync(cancellationToken);
 
+    internal async ValueTask<bool> IsAllocatedAsync(long offset, CancellationToken cancellationToken) =>
+        (await GetDiskAsync(cancellationToken)).IsAllocated(offset);
+
     private async ValueTask<ChunkedVirtualDisk> GetDiskAsync(CancellationToken cancellationToken)
     {
         if (_disk is not null)
