@@ -8,7 +8,6 @@ namespace TeleDisk.Application;
 
 internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, VirtualDiskIndex diskIndex, ILogger<ChunkedVirtualDisk> logger)
 {
-    private readonly Dictionary<long, byte[]> _chunkCache = [];
     private readonly HashSet<long> _dirtyChunkIndexes = [];
     private readonly SemaphoreSlim _semaphore = new(1, 1);
 
@@ -20,8 +19,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
             return new ChunkedVirtualDisk(telegramBlobStore, new(VirtualDiskLayout.CapacityBytes, VirtualDiskLayout.ChunkSizeBytes, []), logger);
         }
 
-        var payload = await telegramBlobStore.DownloadFileAsync(indexFileId, cancellationToken);
-        var diskIndex = JsonSerializer.Deserialize<VirtualDiskIndex>(payload) ?? throw new InvalidOperationException("Invalid disk index.");
+        var diskIndex = await telegramBlobStore.DownloadJsonAsync<VirtualDiskIndex>(indexFileId, cancellationToken) ?? throw new InvalidOperationException("Invalid disk index.");
         return new ChunkedVirtualDisk(telegramBlobStore, diskIndex, logger);
     }
 
@@ -36,14 +34,13 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 var chunkIndex = offset / diskIndex.ChunkSizeBytes;
                 var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
                 var bytesToCopy = Math.Min(destination.Length - destinationOffset, diskIndex.ChunkSizeBytes - chunkOffset);
-                var chunk = await GetChunkAsync(chunkIndex, false, cancellationToken);
-                if (chunk is null)
+                if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var metadata))
                 {
                     destination.Slice(destinationOffset, bytesToCopy).Span.Clear();
                 }
                 else
                 {
-                    chunk.AsMemory(chunkOffset, bytesToCopy).CopyTo(destination.Slice(destinationOffset, bytesToCopy));
+                    await telegramBlobStore.DownloadRangeAsync(metadata.FileId, chunkOffset, destination.Slice(destinationOffset, bytesToCopy), cancellationToken);
                 }
 
                 offset += bytesToCopy;
@@ -67,9 +64,12 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 var chunkIndex = offset / diskIndex.ChunkSizeBytes;
                 var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
                 var bytesToCopy = Math.Min(source.Length - sourceOffset, diskIndex.ChunkSizeBytes - chunkOffset);
-                var chunk = await GetChunkAsync(chunkIndex, true, cancellationToken) ?? throw new InvalidOperationException("Chunk initialization failed.");
-                source.Slice(sourceOffset, bytesToCopy).CopyTo(chunk.AsMemory(chunkOffset, bytesToCopy));
+                var chunkPayload = await telegramBlobStore.DownloadChunkOrZeroAsync(diskIndex.Chunks.GetValueOrDefault(chunkIndex)?.FileId, diskIndex.ChunkSizeBytes, cancellationToken);
+                source.Slice(sourceOffset, bytesToCopy).Span.CopyTo(chunkPayload.AsSpan(chunkOffset, bytesToCopy));
+                var fileId = await telegramBlobStore.UploadFileAsync(chunkPayload, $"chunk-{chunkIndex}.bin", cancellationToken);
+                diskIndex.Chunks[chunkIndex] = new(fileId, Convert.ToHexString(SHA256.HashData(chunkPayload)));
                 _dirtyChunkIndexes.Add(chunkIndex);
+                logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
                 offset += bytesToCopy;
                 sourceOffset += bytesToCopy;
             }
@@ -85,44 +85,20 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
         await _semaphore.WaitAsync(cancellationToken);
         try
         {
-            foreach (var chunkIndex in _dirtyChunkIndexes.ToArray())
+            if (_dirtyChunkIndexes.Count == 0)
             {
-                var chunk = _chunkCache[chunkIndex];
-                var fileId = await telegramBlobStore.UploadFileAsync(chunk, $"chunk-{chunkIndex}.bin", cancellationToken);
-                diskIndex.Chunks[chunkIndex] = new(fileId, Convert.ToHexString(SHA256.HashData(chunk)));
-                _dirtyChunkIndexes.Remove(chunkIndex);
-                logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
+                return;
             }
 
-            var indexFileId = await telegramBlobStore.UploadFileAsync(JsonSerializer.SerializeToUtf8Bytes(diskIndex), "disk-index.json", cancellationToken);
+            var indexFileId = await telegramBlobStore.UploadJsonAsync(diskIndex, "disk-index.json", cancellationToken);
             await telegramBlobStore.SetIndexFileIdAsync(indexFileId, cancellationToken);
+            _dirtyChunkIndexes.Clear();
             logger.LogInformation("Saved index {IndexFileId}", indexFileId);
         }
         finally
         {
             _semaphore.Release();
         }
-    }
-
-    private async Task<byte[]?> GetChunkAsync(long chunkIndex, bool createChunkWhenMissing, CancellationToken cancellationToken)
-    {
-        if (_chunkCache.TryGetValue(chunkIndex, out var chunk))
-        {
-            return chunk;
-        }
-
-        if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var metadata))
-        {
-            return createChunkWhenMissing ? _chunkCache[chunkIndex] = new byte[diskIndex.ChunkSizeBytes] : null;
-        }
-
-        chunk = await telegramBlobStore.DownloadFileAsync(metadata.FileId, cancellationToken);
-        if (chunk.Length != diskIndex.ChunkSizeBytes)
-        {
-            Array.Resize(ref chunk, diskIndex.ChunkSizeBytes);
-        }
-
-        return _chunkCache[chunkIndex] = chunk;
     }
 
     private static void ValidateRange(long offset, int length)

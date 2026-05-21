@@ -35,22 +35,13 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     {
         var listener = new TcpListener(IPAddress.Any, Port);
         listener.Start();
-        logger.LogInformation("NBD listening on 0.0.0.0:{Port}", Port);
         try
         {
             while (true)
             {
                 using var client = await listener.AcceptTcpClientAsync(cancellationToken);
                 client.NoDelay = true;
-                logger.LogInformation("NBD client connected");
-                try
-                {
-                    await HandleClientAsync(client, cancellationToken);
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    logger.LogError(exception, "NBD client failed");
-                }
+                await HandleClientAsync(client, cancellationToken);
             }
         }
         finally
@@ -68,26 +59,27 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task NegotiateNewStyleAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
-        var handshakeBuffer = new byte[18];
-        BinaryPrimitives.WriteUInt64BigEndian(handshakeBuffer, NbdMagic);
-        BinaryPrimitives.WriteUInt64BigEndian(handshakeBuffer.AsSpan(8), NbdOptionMagic);
-        BinaryPrimitives.WriteUInt16BigEndian(handshakeBuffer.AsSpan(16), (ushort)NbdFlagFixedNewStyle);
-        await stream.WriteAsync(handshakeBuffer, cancellationToken);
+                Span<byte> handshakeSpan = stackalloc byte[18];
+        BinaryPrimitives.WriteUInt64BigEndian(handshakeSpan, NbdMagic);
+        BinaryPrimitives.WriteUInt64BigEndian(handshakeSpan[8..], NbdOptionMagic);
+        BinaryPrimitives.WriteUInt16BigEndian(handshakeSpan[16..], (ushort)NbdFlagFixedNewStyle);
+        stream.Write(handshakeSpan);
 
-        var clientFlags = new byte[4];
+        Memory<byte> clientFlags = new byte[4];
         await ReadExactlyAsync(stream, clientFlags, cancellationToken);
 
-        var optionHeaderBuffer = new byte[NbdOptionHeaderBytes];
+        var optionHeader = new byte[NbdOptionHeaderBytes];
         while (true)
         {
-            await ReadExactlyAsync(stream, optionHeaderBuffer, cancellationToken);
-            if (BinaryPrimitives.ReadUInt64BigEndian(optionHeaderBuffer) != NbdOptionMagic)
+            await ReadExactlyAsync(stream, optionHeader, cancellationToken);
+            var optionHeaderSpan = optionHeader.AsSpan();
+            if (BinaryPrimitives.ReadUInt64BigEndian(optionHeaderSpan) != NbdOptionMagic)
             {
                 throw new InvalidOperationException("Invalid NBD option magic");
             }
 
-            var option = BinaryPrimitives.ReadUInt32BigEndian(optionHeaderBuffer.AsSpan(8));
-            var optionLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(optionHeaderBuffer.AsSpan(12)));
+            var option = BinaryPrimitives.ReadUInt32BigEndian(optionHeaderSpan[8..]);
+            var optionLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(optionHeaderSpan[12..]));
             var optionPayload = new byte[optionLength];
             await ReadExactlyAsync(stream, optionPayload, cancellationToken);
 
@@ -116,20 +108,20 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task WriteExportInfoAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
-        var response = new byte[134];
-        BinaryPrimitives.WriteUInt64BigEndian(response, unchecked((ulong)VirtualDiskLayout.CapacityBytes));
-        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(8), (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendWriteZeroes));
-        await stream.WriteAsync(response, cancellationToken);
+        Span<byte> span = stackalloc byte[134];
+        BinaryPrimitives.WriteUInt64BigEndian(span, unchecked((ulong)VirtualDiskLayout.CapacityBytes));
+        BinaryPrimitives.WriteUInt16BigEndian(span[8..], (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendWriteZeroes));
+        stream.Write(span);
     }
 
     private static async Task WriteOptionReplyAsync(NetworkStream stream, uint option, uint replyType, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
     {
-        var replyHeader = new byte[NbdOptionReplyHeaderBytes];
-        BinaryPrimitives.WriteUInt64BigEndian(replyHeader, NbdOptionMagic);
-        BinaryPrimitives.WriteUInt32BigEndian(replyHeader.AsSpan(8), option);
-        BinaryPrimitives.WriteUInt32BigEndian(replyHeader.AsSpan(12), replyType);
-        BinaryPrimitives.WriteUInt32BigEndian(replyHeader.AsSpan(16), checked((uint)payload.Length));
-        await stream.WriteAsync(replyHeader, cancellationToken);
+        Span<byte> span = stackalloc byte[NbdOptionReplyHeaderBytes];
+        BinaryPrimitives.WriteUInt64BigEndian(span, NbdOptionMagic);
+        BinaryPrimitives.WriteUInt32BigEndian(span[8..], option);
+        BinaryPrimitives.WriteUInt32BigEndian(span[12..], replyType);
+        BinaryPrimitives.WriteUInt32BigEndian(span[16..], checked((uint)payload.Length));
+        stream.Write(span);
         if (!payload.IsEmpty)
         {
             await stream.WriteAsync(payload, cancellationToken);
@@ -146,16 +138,17 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                 return;
             }
 
-            var magic = BinaryPrimitives.ReadUInt32BigEndian(requestBuffer);
+            var requestSpan = requestBuffer.AsSpan();
+            var magic = BinaryPrimitives.ReadUInt32BigEndian(requestSpan);
             if (magic != NbdRequestMagic)
             {
                 throw new InvalidOperationException($"Invalid NBD request magic: 0x{magic:X8}");
             }
 
-            var command = (NbdCommand)(BinaryPrimitives.ReadUInt32BigEndian(requestBuffer.AsSpan(4)) & 0xFFFF);
+            var command = (NbdCommand)(BinaryPrimitives.ReadUInt32BigEndian(requestSpan[4..]) & 0xFFFF);
             var handle = requestBuffer.AsMemory(8, 8);
-            var offset = checked((long)BinaryPrimitives.ReadUInt64BigEndian(requestBuffer.AsSpan(16)));
-            var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(requestBuffer.AsSpan(24)));
+            var offset = checked((long)BinaryPrimitives.ReadUInt64BigEndian(requestSpan[16..]));
+            var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(requestSpan[24..]));
 
             if (length > VirtualDiskLayout.MaxChunkPayloadBytes)
             {
@@ -163,48 +156,45 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                 return;
             }
 
-            try
+            switch (command)
             {
-                switch (command)
+                case NbdCommand.Read:
                 {
-                    case NbdCommand.Read:
-                        var readData = new byte[length];
-                        await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
-                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                        await stream.WriteAsync(readData, cancellationToken);
-                        break;
-                    case NbdCommand.Write:
-                        var writeData = new byte[length];
-                        await ReadExactlyAsync(stream, writeData, cancellationToken);
-                        await virtualDiskService.WriteAsync(offset, writeData, cancellationToken);
-                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                        break;
-                    case NbdCommand.Disconnect:
-                        await virtualDiskService.SaveAsync(cancellationToken);
-                        return;
-                    case NbdCommand.Flush:
-                        await virtualDiskService.SaveAsync(cancellationToken);
-                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                        break;
-                    default:
-                        await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
-                        break;
+                    var readData = new byte[length];
+                    await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
+                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                    await stream.WriteAsync(readData, cancellationToken);
+                    break;
                 }
-            }
-            catch (ArgumentOutOfRangeException)
-            {
-                await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                case NbdCommand.Write:
+                {
+                    var writeData = new byte[length];
+                    await ReadExactlyAsync(stream, writeData, cancellationToken);
+                    await virtualDiskService.WriteAsync(offset, writeData, cancellationToken);
+                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                    break;
+                }
+                case NbdCommand.Disconnect:
+                    await virtualDiskService.SaveAsync(cancellationToken);
+                    return;
+                case NbdCommand.Flush:
+                    await virtualDiskService.SaveAsync(cancellationToken);
+                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                    break;
+                default:
+                    await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
+                    break;
             }
         }
     }
 
     private static async Task WriteReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, CancellationToken cancellationToken)
     {
-        var response = new byte[NbdReplyBytes];
-        BinaryPrimitives.WriteUInt32BigEndian(response, NbdReplyMagic);
-        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(4), error);
-        handle.CopyTo(response.AsMemory(8));
-        await stream.WriteAsync(response, cancellationToken);
+        Span<byte> span = stackalloc byte[NbdReplyBytes];
+        BinaryPrimitives.WriteUInt32BigEndian(span, NbdReplyMagic);
+        BinaryPrimitives.WriteUInt32BigEndian(span[4..], error);
+        handle.Span.CopyTo(span[8..]);
+        stream.Write(span);
     }
 
     private static async Task<bool> ReadExactlyOrFalseAsync(NetworkStream stream, Memory<byte> buffer, CancellationToken cancellationToken) =>
