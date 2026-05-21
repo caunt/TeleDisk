@@ -1,5 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Telegram.Bot;
+using TeleDisk.Disk;
+using TeleDisk.Nbd;
+using TeleDisk.Telegram;
 
 namespace TeleDisk;
 
@@ -11,14 +14,11 @@ internal static class DependencyInjection {
 
         serviceCollection.AddSingleton(new TelegramBotToken(botToken));
         serviceCollection.AddSingleton<TelegramBotClient>(serviceProvider => new TelegramBotClient(serviceProvider.GetRequiredService<TelegramBotToken>().Value));
-        serviceCollection.AddHttpClient(nameof(TelegramStore));
-        serviceCollection.AddSingleton<TelegramStore>();
-        serviceCollection.AddSingleton<TelegramDiskService>();
+        serviceCollection.AddHttpClient(nameof(TelegramStorage));
+        serviceCollection.AddSingleton<TelegramStorage>();
+        serviceCollection.AddSingleton<DiskService>();
         serviceCollection.AddSingleton<NbdServer>();
         serviceCollection.AddHostedService<TeleDiskHostedService>();
         return serviceCollection;
     }
 }
-
-
-internal sealed record TelegramBotToken(string Value);

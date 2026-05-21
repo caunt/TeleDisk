@@ -1,23 +1,23 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using TeleDisk.Telegram;
 
-namespace TeleDisk;
+namespace TeleDisk.Disk;
 
-internal sealed class TelegramBackedDisk(TelegramStore telegramStore, TelegramNbdIndex telegramNbdIndex, ILogger<TelegramBackedDisk> logger) {
+internal sealed class TelegramDisk(TelegramStorage telegramStorage, DiskIndex diskIndex, ILogger<TelegramDisk> logger) {
     readonly Dictionary<long, byte[]> _chunkCache = [];
     readonly HashSet<long> _dirtyChunkIndexes = [];
     readonly SemaphoreSlim _semaphore = new(1, 1);
 
-    internal static async Task<TelegramBackedDisk> LoadAsync(TelegramStore telegramStore, CancellationToken cancellationToken) {
-        var indexFileId = await telegramStore.GetIndexFileIdAsync(cancellationToken);
-        var logger = telegramStore.LoggerFactory.CreateLogger<TelegramBackedDisk>();
+    internal static async Task<TelegramDisk> LoadAsync(TelegramStorage telegramStorage, ILogger<TelegramDisk> logger, CancellationToken cancellationToken) {
+        var indexFileId = await telegramStorage.GetIndexFileIdAsync(cancellationToken);
 
         if (string.IsNullOrWhiteSpace(indexFileId))
-            return new TelegramBackedDisk(telegramStore, new TelegramNbdIndex(TelegramNbdConstants.VirtualDiskSizeBytes, TelegramNbdConstants.TelegramChunkSizeBytes, []), logger);
+            return new TelegramDisk(telegramStorage, new DiskIndex(DiskConstants.VirtualDiskSizeBytes, DiskConstants.ChunkSizeBytes, []), logger);
 
-        var telegramNbdIndex = JsonSerializer.Deserialize<TelegramNbdIndex>(await telegramStore.DownloadFileAsync(indexFileId, cancellationToken));
-        return new TelegramBackedDisk(telegramStore, telegramNbdIndex ?? throw new InvalidOperationException("Invalid Telegram NBD index."), logger);
+        var diskIndex = JsonSerializer.Deserialize<DiskIndex>(await telegramStorage.DownloadFileAsync(indexFileId, cancellationToken));
+        return new TelegramDisk(telegramStorage, diskIndex ?? throw new InvalidOperationException("Invalid disk index."), logger);
     }
 
     internal async Task ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken) {
@@ -27,9 +27,9 @@ internal sealed class TelegramBackedDisk(TelegramStore telegramStore, TelegramNb
             ValidateRange(offset, destination.Length);
 
             for (var destinationOffset = 0; destinationOffset < destination.Length;) {
-                var chunkIndex = offset / telegramNbdIndex.ChunkSizeBytes;
-                var chunkOffset = (int)(offset % telegramNbdIndex.ChunkSizeBytes);
-                var bytesToCopy = Math.Min(destination.Length - destinationOffset, telegramNbdIndex.ChunkSizeBytes - chunkOffset);
+                var chunkIndex = offset / diskIndex.ChunkSizeBytes;
+                var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
+                var bytesToCopy = Math.Min(destination.Length - destinationOffset, diskIndex.ChunkSizeBytes - chunkOffset);
                 var chunkBytes = await GetChunkAsync(chunkIndex, false, cancellationToken);
 
                 if (chunkBytes is null)
@@ -53,9 +53,9 @@ internal sealed class TelegramBackedDisk(TelegramStore telegramStore, TelegramNb
             ValidateRange(offset, source.Length);
 
             for (var sourceOffset = 0; sourceOffset < source.Length;) {
-                var chunkIndex = offset / telegramNbdIndex.ChunkSizeBytes;
-                var chunkOffset = (int)(offset % telegramNbdIndex.ChunkSizeBytes);
-                var bytesToCopy = Math.Min(source.Length - sourceOffset, telegramNbdIndex.ChunkSizeBytes - chunkOffset);
+                var chunkIndex = offset / diskIndex.ChunkSizeBytes;
+                var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
+                var bytesToCopy = Math.Min(source.Length - sourceOffset, diskIndex.ChunkSizeBytes - chunkOffset);
                 var chunkBytes = await GetChunkAsync(chunkIndex, true, cancellationToken) ?? throw new InvalidOperationException();
 
                 source.Slice(sourceOffset, bytesToCopy).CopyTo(chunkBytes.AsMemory(chunkOffset, bytesToCopy));
@@ -76,14 +76,14 @@ internal sealed class TelegramBackedDisk(TelegramStore telegramStore, TelegramNb
         try {
             foreach (var chunkIndex in _dirtyChunkIndexes.ToArray()) {
                 var chunkBytes = _chunkCache[chunkIndex];
-                var fileId = await telegramStore.UploadFileAsync(chunkBytes, $"chunk-{chunkIndex}.bin", cancellationToken);
-                telegramNbdIndex.Chunks[chunkIndex] = new TelegramNbdChunk(fileId, Convert.ToHexString(SHA256.HashData(chunkBytes)));
+                var fileId = await telegramStorage.UploadFileAsync(chunkBytes, $"chunk-{chunkIndex}.bin", cancellationToken);
+                diskIndex.Chunks[chunkIndex] = new DiskChunk(fileId, Convert.ToHexString(SHA256.HashData(chunkBytes)));
                 _dirtyChunkIndexes.Remove(chunkIndex);
                 logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
             }
 
-            var indexFileId = await telegramStore.UploadFileAsync(JsonSerializer.SerializeToUtf8Bytes(telegramNbdIndex), "telegram-nbd-index.json", cancellationToken);
-            await telegramStore.SetIndexFileIdAsync(indexFileId, cancellationToken);
+            var indexFileId = await telegramStorage.UploadFileAsync(JsonSerializer.SerializeToUtf8Bytes(diskIndex), "disk-index.json", cancellationToken);
+            await telegramStorage.SetIndexFileIdAsync(indexFileId, cancellationToken);
             logger.LogInformation("Saved index {IndexFileId}", indexFileId);
         }
         finally {
@@ -95,18 +95,18 @@ internal sealed class TelegramBackedDisk(TelegramStore telegramStore, TelegramNb
         if (_chunkCache.TryGetValue(chunkIndex, out var chunkBytes))
             return chunkBytes;
 
-        if (!telegramNbdIndex.Chunks.TryGetValue(chunkIndex, out var chunkInfo))
-            return create ? _chunkCache[chunkIndex] = new byte[telegramNbdIndex.ChunkSizeBytes] : null;
+        if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var chunkInfo))
+            return create ? _chunkCache[chunkIndex] = new byte[diskIndex.ChunkSizeBytes] : null;
 
-        chunkBytes = await telegramStore.DownloadFileAsync(chunkInfo.FileId, cancellationToken);
-        if (chunkBytes.Length != telegramNbdIndex.ChunkSizeBytes)
-            Array.Resize(ref chunkBytes, telegramNbdIndex.ChunkSizeBytes);
+        chunkBytes = await telegramStorage.DownloadFileAsync(chunkInfo.FileId, cancellationToken);
+        if (chunkBytes.Length != diskIndex.ChunkSizeBytes)
+            Array.Resize(ref chunkBytes, diskIndex.ChunkSizeBytes);
 
         return _chunkCache[chunkIndex] = chunkBytes;
     }
 
     static void ValidateRange(long offset, int length) {
-        if (offset < 0 || length < 0 || offset > TelegramNbdConstants.VirtualDiskSizeBytes - length)
+        if (offset < 0 || length < 0 || offset > DiskConstants.VirtualDiskSizeBytes - length)
             throw new ArgumentOutOfRangeException(nameof(offset));
     }
 }

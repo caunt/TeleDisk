@@ -1,29 +1,27 @@
-using System.Net.Http;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 using Telegram.Bot;
 using Telegram.Bot.Types;
 
-namespace TeleDisk;
+namespace TeleDisk.Telegram;
 
-internal sealed class TelegramStore(TelegramBotClient telegramBotClient, IHttpClientFactory httpClientFactory, TelegramBotToken telegramBotToken, ILoggerFactory loggerFactory) {
-    readonly HttpClient _httpClient = httpClientFactory.CreateClient(nameof(TelegramStore));
+internal sealed class TelegramStorage(TelegramBotClient telegramBotClient, IHttpClientFactory httpClientFactory, TelegramBotToken telegramBotToken) {
+    const string StorageChatId = "@CauntHermesBot";
+    const string IndexDescriptionPrefix = "tg-nbd-index:";
 
-    internal ILoggerFactory LoggerFactory { get; } = loggerFactory;
+    readonly HttpClient _httpClient = httpClientFactory.CreateClient(nameof(TelegramStorage));
 
     internal async Task<string?> GetIndexFileIdAsync(CancellationToken cancellationToken) {
         var description = await GetBotDescriptionAsync(cancellationToken);
-        var prefix = TelegramNbdConstants.TelegramIndexDescriptionPrefix;
-        return description.StartsWith(prefix, StringComparison.Ordinal) ? description[prefix.Length..].Trim() : null;
+        return description.StartsWith(IndexDescriptionPrefix, StringComparison.Ordinal) ? description[IndexDescriptionPrefix.Length..].Trim() : null;
     }
 
     internal async Task SetIndexFileIdAsync(string fileId, CancellationToken cancellationToken) {
-        await SetBotDescriptionAsync($"{TelegramNbdConstants.TelegramIndexDescriptionPrefix}{fileId}", cancellationToken);
+        await SetBotDescriptionAsync($"{IndexDescriptionPrefix}{fileId}", cancellationToken);
     }
 
     internal async Task<string> UploadFileAsync(byte[] bytes, string fileName, CancellationToken cancellationToken) {
         await using var stream = new MemoryStream(bytes);
-        var message = await telegramBotClient.SendDocument(TelegramNbdConstants.TelegramStorageChatId, InputFile.FromStream(stream, fileName), cancellationToken: cancellationToken);
+        var message = await telegramBotClient.SendDocument(StorageChatId, InputFile.FromStream(stream, fileName), cancellationToken: cancellationToken);
         return message.Document?.FileId ?? throw new InvalidOperationException("Telegram returned message without document.");
     }
 
