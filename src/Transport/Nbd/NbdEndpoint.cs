@@ -59,7 +59,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task NegotiateNewStyleAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
-                Span<byte> handshakeSpan = stackalloc byte[18];
+        var handshakeSpan = (stackalloc byte[18]);
         BinaryPrimitives.WriteUInt64BigEndian(handshakeSpan, NbdMagic);
         BinaryPrimitives.WriteUInt64BigEndian(handshakeSpan[8..], NbdOptionMagic);
         BinaryPrimitives.WriteUInt16BigEndian(handshakeSpan[16..], (ushort)NbdFlagFixedNewStyle);
@@ -108,7 +108,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task WriteExportInfoAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
-        Span<byte> span = stackalloc byte[134];
+        var span = (stackalloc byte[134]);
         BinaryPrimitives.WriteUInt64BigEndian(span, unchecked((ulong)VirtualDiskLayout.CapacityBytes));
         BinaryPrimitives.WriteUInt16BigEndian(span[8..], (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendWriteZeroes));
         stream.Write(span);
@@ -116,7 +116,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task WriteOptionReplyAsync(NetworkStream stream, uint option, uint replyType, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
     {
-        Span<byte> span = stackalloc byte[NbdOptionReplyHeaderBytes];
+        var span = (stackalloc byte[NbdOptionReplyHeaderBytes]);
         BinaryPrimitives.WriteUInt64BigEndian(span, NbdOptionMagic);
         BinaryPrimitives.WriteUInt32BigEndian(span[8..], option);
         BinaryPrimitives.WriteUInt32BigEndian(span[12..], replyType);
@@ -190,7 +190,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task WriteReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, CancellationToken cancellationToken)
     {
-        Span<byte> span = stackalloc byte[NbdReplyBytes];
+        var span = (stackalloc byte[NbdReplyBytes]);
         BinaryPrimitives.WriteUInt32BigEndian(span, NbdReplyMagic);
         BinaryPrimitives.WriteUInt32BigEndian(span[4..], error);
         handle.Span.CopyTo(span[8..]);
