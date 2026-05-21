@@ -77,30 +77,37 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                 return;
             }
 
-            switch (command)
+            try
             {
-                case NbdCommand.Read:
-                    var readData = new byte[length];
-                    await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
-                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                    await stream.WriteAsync(readData, cancellationToken);
-                    break;
-                case NbdCommand.Write:
-                    var writeData = new byte[length];
-                    await ReadExactlyAsync(stream, writeData, cancellationToken);
-                    await virtualDiskService.WriteAsync(offset, writeData, cancellationToken);
-                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                    break;
-                case NbdCommand.Disconnect:
-                    await virtualDiskService.SaveAsync(cancellationToken);
-                    return;
-                case NbdCommand.Flush:
-                    await virtualDiskService.SaveAsync(cancellationToken);
-                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                    break;
-                default:
-                    await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
-                    break;
+                switch (command)
+                {
+                    case NbdCommand.Read:
+                        var readData = new byte[length];
+                        await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
+                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                        await stream.WriteAsync(readData, cancellationToken);
+                        break;
+                    case NbdCommand.Write:
+                        var writeData = new byte[length];
+                        await ReadExactlyAsync(stream, writeData, cancellationToken);
+                        await virtualDiskService.WriteAsync(offset, writeData, cancellationToken);
+                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                        break;
+                    case NbdCommand.Disconnect:
+                        await virtualDiskService.SaveAsync(cancellationToken);
+                        return;
+                    case NbdCommand.Flush:
+                        await virtualDiskService.SaveAsync(cancellationToken);
+                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                        break;
+                    default:
+                        await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
+                        break;
+                }
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
             }
         }
     }
