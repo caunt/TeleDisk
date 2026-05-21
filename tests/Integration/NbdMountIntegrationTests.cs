@@ -56,10 +56,9 @@ public sealed class NbdMountIntegrationTests
 
     private static async Task RunInContainerAsync(string command)
     {
-        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(BotTokenVariable)))
-        {
-            return;
-        }
+        Assert.False(
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(BotTokenVariable)),
+            $"Set {BotTokenVariable} to run integration tests.");
 
         var hostApplicationBuilder = Host.CreateApplicationBuilder();
         hostApplicationBuilder.Services.AddTeleDisk();
