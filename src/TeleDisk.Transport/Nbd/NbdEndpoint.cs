@@ -13,6 +13,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const int Port = 10809;
     private const ulong NbdMagic = 0x4e42444d41474943;
     private const ulong NbdOptionMagic = 0x49484156454F5054;
+    private const ulong NbdOptionReplyMagic = 0x3e889045565a9;
     private const uint NbdRequestMagic = 0x25609513;
     private const uint NbdReplyMagic = 0x67446698;
     private const uint NbdStructuredReplyMagic = 0x668e33ef;
@@ -222,7 +223,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private static async Task WriteOptionReplyAsync(NetworkStream stream, uint option, uint replyType, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
     {
         var span = (stackalloc byte[NbdOptionReplyHeaderBytes]);
-        BinaryPrimitives.WriteUInt64BigEndian(span, NbdOptionMagic);
+        BinaryPrimitives.WriteUInt64BigEndian(span, NbdOptionReplyMagic);
         BinaryPrimitives.WriteUInt32BigEndian(span[8..], option);
         BinaryPrimitives.WriteUInt32BigEndian(span[12..], replyType);
         BinaryPrimitives.WriteUInt32BigEndian(span[16..], checked((uint)payload.Length));
