@@ -68,7 +68,15 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             {
                 using var client = await listener.AcceptTcpClientAsync(cancellationToken);
                 client.NoDelay = true;
-                await HandleClientAsync(client, cancellationToken);
+
+                try
+                {
+                    await HandleClientAsync(client, cancellationToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    logger.LogWarning(exception, "NBD client session ended with an error");
+                }
             }
         }
         finally
