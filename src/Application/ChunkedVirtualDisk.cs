@@ -80,6 +80,14 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
         }
     }
 
+
+    internal bool IsAllocated(long offset)
+    {
+        ValidateRange(offset, 1);
+        var chunkIndex = offset / diskIndex.ChunkSizeBytes;
+        return diskIndex.Chunks.ContainsKey(chunkIndex);
+    }
+
     internal async Task SaveAsync(CancellationToken cancellationToken)
     {
         await _semaphore.WaitAsync(cancellationToken);
