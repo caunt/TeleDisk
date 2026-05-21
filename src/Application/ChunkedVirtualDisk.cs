@@ -16,10 +16,10 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
         var indexFileId = await telegramBlobStore.GetIndexFileIdAsync(cancellationToken);
         if (string.IsNullOrWhiteSpace(indexFileId))
         {
-            return new ChunkedVirtualDisk(telegramBlobStore, new(VirtualDiskLayout.CapacityBytes, VirtualDiskLayout.ChunkSizeBytes, []), logger);
+            return new ChunkedVirtualDisk(telegramBlobStore, VirtualDiskIndex.CreateDefault(), logger);
         }
 
-        var diskIndex = await telegramBlobStore.DownloadJsonAsync<VirtualDiskIndex>(indexFileId, cancellationToken) ?? throw new InvalidOperationException("Invalid disk index.");
+        var diskIndex = VirtualDiskIndex.Sanitize(await telegramBlobStore.DownloadJsonAsync<VirtualDiskIndex>(indexFileId, cancellationToken));
         return new ChunkedVirtualDisk(telegramBlobStore, diskIndex, logger);
     }
 
@@ -94,7 +94,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 var isFullChunkWrite = chunkOffset == 0 && bytesToZero == diskIndex.ChunkSizeBytes;
                 if (isFullChunkWrite)
                 {
-                    diskIndex.Chunks[chunkIndex] = VirtualDiskChunk.Zero;
+                    diskIndex.Chunks.Remove(chunkIndex);
                     _dirtyChunkIndexes.Add(chunkIndex);
                     logger.LogInformation("Marked chunk {ChunkIndex} as zero", chunkIndex);
                 }
@@ -104,7 +104,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                     chunkPayload.AsSpan(chunkOffset, bytesToZero).Clear();
                     if (chunkPayload.All(static value => value == 0))
                     {
-                        diskIndex.Chunks[chunkIndex] = VirtualDiskChunk.Zero;
+                        diskIndex.Chunks.Remove(chunkIndex);
                         logger.LogInformation("Marked chunk {ChunkIndex} as zero", chunkIndex);
                     }
                     else
@@ -132,7 +132,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
     {
         ValidateRange(offset, 1);
         var chunkIndex = offset / diskIndex.ChunkSizeBytes;
-        return diskIndex.Chunks.ContainsKey(chunkIndex);
+        return diskIndex.Chunks.TryGetValue(chunkIndex, out var chunk) && !chunk.IsZero;
     }
 
     internal async Task SaveAsync(CancellationToken cancellationToken)
