@@ -19,6 +19,7 @@ These rules are **strict**. All contributions — whether from humans or AI agen
 - Prefer **`init`** over `set` for properties that are only written during construction.
 - Use **pattern matching** (`is`, `switch` expressions, list patterns) over type-casting chains.
 - Use **collection expressions** (`[a, b, c]`) instead of `new List<T> { }` or `new[] { }`.
+- Allocate stack spans with `var span = (stackalloc byte[12345]);` syntax.
 - Use **`var`** when the type is obvious from the right-hand side; spell out the type when it aids clarity.
 - Prefer `async`/`await` over `.Result`/`.Wait()`. Never block on async code.
 - Use **`ValueTask`** when a method is expected to complete synchronously most of the time.
