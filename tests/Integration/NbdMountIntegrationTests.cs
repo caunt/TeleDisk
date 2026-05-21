@@ -45,8 +45,8 @@ public sealed class NbdMountIntegrationTests
     public Task CacheCommand_ShouldAcceptPrefetchLikeOperations(string command) => RunInContainerAsync(command);
 
     [Theory]
-    [InlineData("nbd-client -d /dev/nbd0 2>/dev/null || true; nbd-client host.testcontainers.internal 10809 /dev/nbd0; nbd-client -d /dev/nbd0")]
-    [InlineData("nbd-client -d /dev/nbd0 2>/dev/null || true; nbd-client host.testcontainers.internal 10809 /dev/nbd0 -b 4096; nbd-client -d /dev/nbd0")]
+    [InlineData("nbd-client -d /dev/nbd0 2>/dev/null || true; nbd-client -N teledisk host.testcontainers.internal 10809 /dev/nbd0; nbd-client -d /dev/nbd0")]
+    [InlineData("nbd-client -d /dev/nbd0 2>/dev/null || true; nbd-client -N teledisk host.testcontainers.internal 10809 /dev/nbd0 -b 4096; nbd-client -d /dev/nbd0")]
     public Task DisconnectCommand_ShouldCloseSessionsCleanly(string command) => RunInContainerAsync(command);
 
     [Theory]
