@@ -8,8 +8,6 @@ These rules are **strict**. All contributions — whether from humans or AI agen
 
 ### Language & Runtime
 
-- Target **net10.0** exclusively. Do not add any downgrade target-framework entries.
-- Enable `<Nullable>enable</Nullable>` and `<ImplicitUsings>enable</ImplicitUsings>` in every `.csproj`.
 - Never suppress nullable warnings with `!` (null-forgiving operator) unless the surrounding code makes nullability provably impossible and a brief comment explains why.
 
 ### Code Style
@@ -34,7 +32,7 @@ These rules are **strict**. All contributions — whether from humans or AI agen
 ### Formatting
 
 - **4 spaces** — no tabs.
-- Opening brace on the **same line** for methods and types (Allman is not used here).
+- Opening brace on the **next line** for methods and types.
 - One blank line between members; two blank lines between top-level type declarations.
 - **No trailing whitespace**. Files must end with a single newline.
 
