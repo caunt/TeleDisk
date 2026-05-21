@@ -15,6 +15,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../src/TeleDisk.csproj" />
+    <ProjectReference Include="../src/TeleDisk.Host/TeleDisk.Host.csproj" />
   </ItemGroup>
 </Project>
