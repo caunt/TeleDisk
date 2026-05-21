@@ -11,6 +11,12 @@ internal static class DependencyInjection
     internal static IServiceCollection AddTeleDisk(this IServiceCollection serviceCollection)
     {
         var botToken = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
+        AddTeleDisk(serviceCollection, botToken);
+        return serviceCollection;
+    }
+
+    internal static IServiceCollection AddTeleDisk(this IServiceCollection serviceCollection, string? botToken)
+    {
         if (string.IsNullOrWhiteSpace(botToken))
         {
             throw new InvalidOperationException("TELEGRAM_BOT_TOKEN is not set.");
