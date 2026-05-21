@@ -2,10 +2,11 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
+using TeleDisk.Disk;
 
-namespace TeleDisk;
+namespace TeleDisk.Nbd;
 
-internal sealed class NbdServer(TelegramDiskService telegramDiskService, ILogger<NbdServer> logger) {
+internal sealed class NbdServer(DiskService diskService, ILogger<NbdServer> logger) {
     const int Port = 10809;
     const ulong NbdMagic = 0x4e42444d41474943;
     const ulong NbdOldStyleMagic = 0x0000420281861253;
@@ -63,7 +64,7 @@ internal sealed class NbdServer(TelegramDiskService telegramDiskService, ILogger
             var offset = checked((long)BinaryPrimitives.ReadUInt64BigEndian(requestBuffer.AsSpan(16)));
             var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(requestBuffer.AsSpan(24)));
 
-            if (length > TelegramNbdConstants.TelegramHostedBotApiMaxDownloadFileSizeBytes) {
+            if (length > DiskConstants.MaxFileSizeBytes) {
                 await WriteReplyAsync(networkStream, handle, NbdErrorInvalidArgument, cancellationToken);
                 return;
             }
@@ -71,7 +72,7 @@ internal sealed class NbdServer(TelegramDiskService telegramDiskService, ILogger
             switch (commandType) {
                 case NbdReadCommand:
                     var readData = new byte[length];
-                    await telegramDiskService.ReadAsync(offset, readData, cancellationToken);
+                    await diskService.ReadAsync(offset, readData, cancellationToken);
                     await WriteReplyAsync(networkStream, handle, 0, cancellationToken);
                     await networkStream.WriteAsync(readData, cancellationToken);
                     break;
@@ -79,16 +80,16 @@ internal sealed class NbdServer(TelegramDiskService telegramDiskService, ILogger
                 case NbdWriteCommand:
                     var writeData = new byte[length];
                     await ReadExactlyAsync(networkStream, writeData, cancellationToken);
-                    await telegramDiskService.WriteAsync(offset, writeData, cancellationToken);
+                    await diskService.WriteAsync(offset, writeData, cancellationToken);
                     await WriteReplyAsync(networkStream, handle, 0, cancellationToken);
                     break;
 
                 case NbdDisconnectCommand:
-                    await telegramDiskService.SaveAsync(cancellationToken);
+                    await diskService.SaveAsync(cancellationToken);
                     return;
 
                 case NbdFlushCommand:
-                    await telegramDiskService.SaveAsync(cancellationToken);
+                    await diskService.SaveAsync(cancellationToken);
                     await WriteReplyAsync(networkStream, handle, 0, cancellationToken);
                     break;
 
@@ -103,7 +104,7 @@ internal sealed class NbdServer(TelegramDiskService telegramDiskService, ILogger
         var handshakeBuffer = new byte[NbdHandshakeBytes];
         BinaryPrimitives.WriteUInt64BigEndian(handshakeBuffer, NbdMagic);
         BinaryPrimitives.WriteUInt64BigEndian(handshakeBuffer.AsSpan(8), NbdOldStyleMagic);
-        BinaryPrimitives.WriteUInt64BigEndian(handshakeBuffer.AsSpan(16), unchecked((ulong)TelegramNbdConstants.VirtualDiskSizeBytes));
+        BinaryPrimitives.WriteUInt64BigEndian(handshakeBuffer.AsSpan(16), unchecked((ulong)DiskConstants.VirtualDiskSizeBytes));
         await networkStream.WriteAsync(handshakeBuffer, cancellationToken);
     }
 

@@ -1,11 +1,14 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using TeleDisk.Disk;
+using TeleDisk.Nbd;
 
 namespace TeleDisk;
 
-internal sealed class TeleDiskHostedService(NbdServer nbdServer, TelegramDiskService telegramDiskService, ILogger<TeleDiskHostedService> logger) : BackgroundService {
+internal sealed class TeleDiskHostedService(NbdServer nbdServer, DiskService diskService, ILogger<TeleDiskHostedService> logger) : BackgroundService {
     static readonly TimeSpan SaveInterval = TimeSpan.FromSeconds(30);
 
+    /// <summary>Runs the NBD server and periodic save loop until cancellation is requested.</summary>
     protected override async Task ExecuteAsync(CancellationToken cancellationToken) {
         var periodicSaveTask = SavePeriodicallyAsync(cancellationToken);
 
@@ -24,7 +27,7 @@ internal sealed class TeleDiskHostedService(NbdServer nbdServer, TelegramDiskSer
         while (!cancellationToken.IsCancellationRequested) {
             try {
                 await Task.Delay(SaveInterval, cancellationToken);
-                await telegramDiskService.SaveAsync(cancellationToken);
+                await diskService.SaveAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
                 return;
@@ -37,7 +40,7 @@ internal sealed class TeleDiskHostedService(NbdServer nbdServer, TelegramDiskSer
 
     async Task SaveOnShutdownAsync() {
         try {
-            await telegramDiskService.SaveAsync(CancellationToken.None);
+            await diskService.SaveAsync(CancellationToken.None);
         }
         catch (Exception exception) {
             logger.LogError(exception, "Shutdown save failed");
