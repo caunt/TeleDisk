@@ -34,13 +34,13 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 var chunkIndex = offset / diskIndex.ChunkSizeBytes;
                 var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
                 var bytesToCopy = Math.Min(destination.Length - destinationOffset, diskIndex.ChunkSizeBytes - chunkOffset);
-                if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var metadata))
+                if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var metadata) || metadata is not { FileId: { } fileId })
                 {
                     destination.Slice(destinationOffset, bytesToCopy).Span.Clear();
                 }
                 else
                 {
-                    await telegramBlobStore.DownloadRangeAsync(metadata.FileId, chunkOffset, destination.Slice(destinationOffset, bytesToCopy), cancellationToken);
+                    await telegramBlobStore.DownloadRangeAsync(fileId, chunkOffset, destination.Slice(destinationOffset, bytesToCopy), cancellationToken);
                 }
 
                 offset += bytesToCopy;
@@ -72,6 +72,53 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
                 offset += bytesToCopy;
                 sourceOffset += bytesToCopy;
+            }
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    internal async Task WriteZeroesAsync(long offset, int length, CancellationToken cancellationToken)
+    {
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            ValidateRange(offset, length);
+            for (var remainingBytes = length; remainingBytes > 0;)
+            {
+                var chunkIndex = offset / diskIndex.ChunkSizeBytes;
+                var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
+                var bytesToZero = Math.Min(remainingBytes, diskIndex.ChunkSizeBytes - chunkOffset);
+                var isFullChunkWrite = chunkOffset == 0 && bytesToZero == diskIndex.ChunkSizeBytes;
+                if (isFullChunkWrite)
+                {
+                    diskIndex.Chunks[chunkIndex] = VirtualDiskChunk.Zero;
+                    _dirtyChunkIndexes.Add(chunkIndex);
+                    logger.LogInformation("Marked chunk {ChunkIndex} as zero", chunkIndex);
+                }
+                else
+                {
+                    var chunkPayload = await telegramBlobStore.DownloadChunkOrZeroAsync(diskIndex.Chunks.GetValueOrDefault(chunkIndex)?.FileId, diskIndex.ChunkSizeBytes, cancellationToken);
+                    chunkPayload.AsSpan(chunkOffset, bytesToZero).Clear();
+                    if (chunkPayload.All(static value => value == 0))
+                    {
+                        diskIndex.Chunks[chunkIndex] = VirtualDiskChunk.Zero;
+                        logger.LogInformation("Marked chunk {ChunkIndex} as zero", chunkIndex);
+                    }
+                    else
+                    {
+                        var fileId = await telegramBlobStore.UploadFileAsync(chunkPayload, $"chunk-{chunkIndex}.bin", cancellationToken);
+                        diskIndex.Chunks[chunkIndex] = new(fileId, Convert.ToHexString(SHA256.HashData(chunkPayload)));
+                        logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
+                    }
+
+                    _dirtyChunkIndexes.Add(chunkIndex);
+                }
+
+                offset += bytesToZero;
+                remainingBytes -= bytesToZero;
             }
         }
         finally

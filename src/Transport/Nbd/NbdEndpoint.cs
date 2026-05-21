@@ -279,8 +279,11 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     break;
                 case NbdCommand.Trim:
                 case NbdCommand.Cache:
-                case NbdCommand.WriteZeroes:
                 case NbdCommand.Resize:
+                    await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                    break;
+                case NbdCommand.WriteZeroes:
+                    await virtualDiskService.WriteZeroesAsync(offset, length, cancellationToken);
                     await WriteReplyAsync(stream, handle, 0, cancellationToken);
                     break;
                 case NbdCommand.BlockStatus:
