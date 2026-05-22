@@ -17,8 +17,8 @@ public sealed class NbdMountIntegrationTests
     private const int ServerLogLineLimit = 200;
 
     [Theory]
-    [InlineData("printf 'alpha' | qemu-io -f raw -c \"write 0 5\" nbd://host.testcontainers.internal:10809 && qemu-io -f raw -c \"read -P 0x61 0 1\" -c \"read -P 0x6c 1 1\" nbd://host.testcontainers.internal:10809")]
-    [InlineData("printf 'bravo' | qemu-io -f raw -c \"write 512 5\" nbd://host.testcontainers.internal:10809 && qemu-io -f raw -c \"read -P 0x62 512 1\" -c \"read -P 0x6f 516 1\" nbd://host.testcontainers.internal:10809")]
+    [InlineData("qemu-io -f raw -c \"write -P 0x61 0 1\" -c \"write -P 0x6c 1 1\" -c \"write -P 0x70 2 1\" -c \"write -P 0x68 3 1\" -c \"write -P 0x61 4 1\" -c \"read -P 0x61 0 1\" -c \"read -P 0x6c 1 1\" -c \"read -P 0x70 2 1\" -c \"read -P 0x68 3 1\" -c \"read -P 0x61 4 1\" nbd://host.testcontainers.internal:10809")]
+    [InlineData("qemu-io -f raw -c \"write -P 0x62 512 1\" -c \"write -P 0x72 513 1\" -c \"write -P 0x61 514 1\" -c \"write -P 0x76 515 1\" -c \"write -P 0x6f 516 1\" -c \"read -P 0x62 512 1\" -c \"read -P 0x72 513 1\" -c \"read -P 0x61 514 1\" -c \"read -P 0x76 515 1\" -c \"read -P 0x6f 516 1\" nbd://host.testcontainers.internal:10809")]
     public Task ReadWriteCommands_ShouldRoundTripData(string command) => RunInContainerAsync(command);
 
     [Theory]
@@ -52,8 +52,8 @@ public sealed class NbdMountIntegrationTests
     public Task DisconnectCommand_ShouldCloseSessionsCleanly(string command) => RunInContainerAsync(command);
 
     [Theory]
-    [InlineData("qemu-img resize nbd://host.testcontainers.internal:10809 12M && qemu-img info nbd://host.testcontainers.internal:10809 | grep -F \"12 MiB\"")]
     [InlineData("qemu-img resize nbd://host.testcontainers.internal:10809 16M && qemu-img info nbd://host.testcontainers.internal:10809 | grep -F \"16 MiB\"")]
+    [InlineData("qemu-img resize --shrink nbd://host.testcontainers.internal:10809 12M && qemu-img info nbd://host.testcontainers.internal:10809 | grep -F \"12 MiB\"")]
     public Task ResizeCommand_ShouldUpdateExportCapacity(string command) => RunInContainerAsync(command);
 
     private static async Task RunInContainerAsync(string command)

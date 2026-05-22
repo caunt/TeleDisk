@@ -59,6 +59,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const uint NbdStateHole = 1;
     private const uint NbdStateZero = 1 << 1;
     private const int NbdRequestBytes = 28;
+    private const int NbdExtendedRequestBytes = 32;
     private const int NbdReplyBytes = 16;
     private const int NbdOptionHeaderBytes = 16;
     private const int NbdOptionReplyHeaderBytes = 20;
@@ -172,8 +173,8 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
             if (option == NbdOptionExtendedHeaders)
             {
-                state = state with { ExtendedHeadersEnabled = false };
-                await WriteOptionReplyAsync(stream, option, NbdReplyTypeErrUnsupported, ReadOnlyMemory<byte>.Empty, cancellationToken);
+                state = state with { ExtendedHeadersEnabled = true };
+                await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
                 continue;
             }
 
@@ -181,7 +182,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             {
                 if (option == NbdOptionSetMetaContext)
                 {
-                    state = state with { BlockStatusContextEnabled = IsBaseAllocationSetMetaContext(optionPayload) };
+                    state = state with { BlockStatusContextId = GetBaseAllocationContextId(optionPayload) };
                 }
 
                 await WriteMetaContextReplyAsync(stream, option, cancellationToken);
@@ -270,14 +271,15 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         logger.LogInformation(
             "NBD negotiation structuredRepliesEnabled={StructuredRepliesEnabled} blockStatusEnabled={BlockStatusEnabled} extendedHeadersEnabled={ExtendedHeadersEnabled}",
             state.StructuredRepliesEnabled,
-            state.BlockStatusContextEnabled,
+            state.BlockStatusContextId is not null,
             state.ExtendedHeadersEnabled);
-        var requestBuffer = new byte[NbdRequestBytes];
+        var requestBuffer = new byte[NbdExtendedRequestBytes];
         try
         {
             while (true)
             {
-                if (!await ReadExactlyOrFalseAsync(stream, requestBuffer, cancellationToken))
+                var headerLength = state.ExtendedHeadersEnabled ? NbdExtendedRequestBytes : NbdRequestBytes;
+                if (!await ReadExactlyOrFalseAsync(stream, requestBuffer.AsMemory(0, headerLength), cancellationToken))
                 {
                     return;
                 }
@@ -412,7 +414,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private async Task HandleBlockStatusAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
     {
-        if (!state.StructuredRepliesEnabled || !state.BlockStatusContextEnabled)
+        if (!state.StructuredRepliesEnabled || state.BlockStatusContextId is null)
         {
             await WriteReplyAsync(stream, handle, NbdErrorNotSupported, true, cancellationToken);
             return;
@@ -420,7 +422,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
         var isAllocated = await virtualDiskService.IsAllocatedAsync(offset, cancellationToken);
         var payload = new byte[12];
-        BinaryPrimitives.WriteUInt32BigEndian(payload, NbdMetaContextBaseAllocation);
+        BinaryPrimitives.WriteUInt32BigEndian(payload, state.BlockStatusContextId.Value);
         BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(4), checked((uint)length));
         BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(8), isAllocated ? 0U : NbdStateHole | NbdStateZero);
         await WriteStructuredReplyAsync(stream, handle, NbdStructuredReplyTypeBlockStatus, NbdStructuredReplyFlagDone, payload, cancellationToken);
@@ -549,15 +551,46 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
     }
 
-    private static bool IsBaseAllocationSetMetaContext(ReadOnlySpan<byte> payload)
+    internal static uint? GetBaseAllocationContextId(ReadOnlySpan<byte> payload)
     {
-        if (payload.Length < 4)
+        if (payload.Length < 8)
         {
-            return false;
+            return null;
         }
 
-        var queryLength = BinaryPrimitives.ReadUInt32BigEndian(payload);
-        return queryLength == 15 && payload.Length >= 19 && Encoding.UTF8.GetString(payload[4..19]) == "base:allocation";
+        var exportNameLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(payload));
+        if (payload.Length < 8 + exportNameLength)
+        {
+            return null;
+        }
+
+        var contextCount = checked((int)BinaryPrimitives.ReadUInt32BigEndian(payload[(4 + exportNameLength)..]));
+        var offset = 8 + exportNameLength;
+        uint nextContextId = 1;
+        for (var contextIndex = 0; contextIndex < contextCount; contextIndex++)
+        {
+            if (payload.Length < offset + 4)
+            {
+                return null;
+            }
+
+            var contextLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(payload[offset..]));
+            offset += 4;
+            if (payload.Length < offset + contextLength)
+            {
+                return null;
+            }
+
+            if (contextLength == 15 && Encoding.UTF8.GetString(payload.Slice(offset, contextLength)) == "base:allocation")
+            {
+                return nextContextId;
+            }
+
+            nextContextId++;
+            offset += contextLength;
+        }
+
+        return null;
     }
 }
 
@@ -574,4 +607,4 @@ internal enum NbdCommand : ushort
     Resize = 8
 }
 
-internal sealed record NbdConnectionState(bool EnterTransmission = false, bool StructuredRepliesEnabled = false, bool ClientSupportsNoZeroes = false, bool BlockStatusContextEnabled = false, bool ExtendedHeadersEnabled = false);
+internal sealed record NbdConnectionState(bool EnterTransmission = false, bool StructuredRepliesEnabled = false, bool ClientSupportsNoZeroes = false, uint? BlockStatusContextId = null, bool ExtendedHeadersEnabled = false);
