@@ -44,6 +44,7 @@ return;
 static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken cancellationToken)
 {
     const string resultsPath = "/tmp/fio-results.json";
+    const string fioJobPath = "/tmp/tele-disk.fio";
     var script = string.Join(";", [
         "set -euo pipefail",
         "apt-get update >/dev/null",
@@ -57,7 +58,30 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
         "mkfs.ext4 -F /dev/nbd0 >/dev/null",
         "mkdir -p /mnt/nbd",
         "mount /dev/nbd0 /mnt/nbd",
-        $"fio --name=tele-disk --directory=/mnt/nbd --filename=benchfile --size=64m --rw=randrw --rwmixread=50 --bs=4k --iodepth=32 --numjobs=1 --direct=1 --time_based=1 --runtime=30 --group_reporting=1 --output-format=json --output={resultsPath}",
+        $"cat > {fioJobPath} <<'EOF'",
+        "[global]",
+        "directory=/mnt/nbd",
+        "filename=benchfile",
+        "size=256m",
+        "ioengine=libaio",
+        "direct=1",
+        "time_based=1",
+        "runtime=25",
+        "ramp_time=3",
+        "bs=4k",
+        "iodepth=32",
+        "numjobs=1",
+        "group_reporting=1",
+        "invalidate=1",
+        "",
+        "[read]",
+        "rw=randread",
+        "",
+        "[write]",
+        "rw=randwrite",
+        "stonewall",
+        "EOF",
+        $"fio --output-format=json --output={resultsPath} {fioJobPath}",
         "umount /mnt/nbd",
         "nbd-client -d /dev/nbd0",
         $"cat {resultsPath}"
@@ -80,10 +104,15 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
         cancellationToken);
     if (exitCode != 0)
     {
-        throw new InvalidOperationException($"Benchmark container failed with exit code {exitCode}.{Environment.NewLine}{stderr}");
+        throw new InvalidOperationException($"Benchmark container failed with exit code {exitCode}.{Environment.NewLine}{CaptureDiagnosticTail(stdout, stderr)}");
     }
 
-    var start = stdout.IndexOf('{');
+    if (!string.IsNullOrWhiteSpace(stderr))
+    {
+        Console.WriteLine($"Benchmark container stderr (tail):{Environment.NewLine}{CaptureDiagnosticTail(string.Empty, stderr)}");
+    }
+
+    var start = stdout.LastIndexOf('{');
     if (start < 0)
     {
         throw new InvalidOperationException("fio JSON results were not found in container output.");
@@ -91,19 +120,105 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
 
     var fioJson = stdout[start..];
     using var fioDocument = JsonDocument.Parse(fioJson);
-    var job = fioDocument.RootElement.GetProperty("jobs")[0];
-    var read = job.GetProperty("read");
-    var write = job.GetProperty("write");
+    var jobs = fioDocument.RootElement.GetProperty("jobs");
+    var read = FindMetricsSection(jobs, "read");
+    var write = FindMetricsSection(jobs, "write");
+
+    var readThroughputMiBPerSecond = GetPositiveDouble(read, "bw_bytes", "read throughput", fioJson) / 1024 / 1024;
+    var writeThroughputMiBPerSecond = GetPositiveDouble(write, "bw_bytes", "write throughput", fioJson) / 1024 / 1024;
+    var readIops = GetPositiveDouble(read, "iops", "read iops", fioJson);
+    var writeIops = GetPositiveDouble(write, "iops", "write iops", fioJson);
+
     return new BenchmarkMetrics
     {
-        ReadThroughputMiBPerSecond = read.GetProperty("bw_bytes").GetDouble() / 1024 / 1024,
-        WriteThroughputMiBPerSecond = write.GetProperty("bw_bytes").GetDouble() / 1024 / 1024,
-        ReadIops = read.GetProperty("iops").GetDouble(),
-        WriteIops = write.GetProperty("iops").GetDouble(),
-        ReadLatencyMilliseconds = read.GetProperty("lat_ns").GetProperty("mean").GetDouble() / 1_000_000,
-        WriteLatencyMilliseconds = write.GetProperty("lat_ns").GetProperty("mean").GetDouble() / 1_000_000
+        ReadThroughputMiBPerSecond = readThroughputMiBPerSecond,
+        WriteThroughputMiBPerSecond = writeThroughputMiBPerSecond,
+        ReadIops = readIops,
+        WriteIops = writeIops,
+        ReadLatencyMilliseconds = GetLatencyMilliseconds(read, "read latency", fioJson),
+        WriteLatencyMilliseconds = GetLatencyMilliseconds(write, "write latency", fioJson)
     };
 }
+
+static JsonElement FindMetricsSection(JsonElement jobs, string sectionName)
+{
+    foreach (var job in jobs.EnumerateArray())
+    {
+        if (!job.TryGetProperty(sectionName, out var section))
+        {
+            continue;
+        }
+
+        if (section.TryGetProperty("io_bytes", out var ioBytes) &&
+            ioBytes.ValueKind == JsonValueKind.Number &&
+            ioBytes.TryGetInt64(out var value) &&
+            value > 0)
+        {
+            return section;
+        }
+    }
+
+    throw new InvalidOperationException($"fio did not report any {sectionName} io_bytes in jobs: {jobs}");
+}
+
+static double GetPositiveDouble(JsonElement section, string propertyName, string metricName, string fioJson)
+{
+    if (!section.TryGetProperty(propertyName, out var property) ||
+        property.ValueKind != JsonValueKind.Number)
+    {
+        throw new InvalidOperationException($"fio is missing numeric {metricName} ({propertyName}). Section: {section}");
+    }
+
+    var value = property.GetDouble();
+    if (value <= 0)
+    {
+        throw new InvalidOperationException($"fio reported non-positive {metricName}={value}. Relevant section: {section}. fio: {fioJson}");
+    }
+
+    return value;
+}
+
+static double GetLatencyMilliseconds(JsonElement section, string metricName, string fioJson)
+{
+    if (TryGetLatencyMilliseconds(section, "lat_ns", out var latency) ||
+        TryGetLatencyMilliseconds(section, "clat_ns", out latency))
+    {
+        return latency;
+    }
+
+    throw new InvalidOperationException($"fio is missing latency mean for {metricName}. Section: {section}. fio: {fioJson}");
+}
+
+static bool TryGetLatencyMilliseconds(JsonElement section, string propertyName, out double latencyMilliseconds)
+{
+    latencyMilliseconds = 0;
+    if (!section.TryGetProperty(propertyName, out var latencySection) ||
+        !latencySection.TryGetProperty("mean", out var mean) ||
+        mean.ValueKind != JsonValueKind.Number)
+    {
+        return false;
+    }
+
+    latencyMilliseconds = mean.GetDouble() / 1_000_000;
+    return latencyMilliseconds > 0;
+}
+
+static string CaptureDiagnosticTail(string stdout, string stderr)
+{
+    const int maxLength = 4000;
+    var combined = string.Concat(
+        "STDOUT tail:",
+        Environment.NewLine,
+        TakeTail(stdout, maxLength / 2),
+        Environment.NewLine,
+        "STDERR tail:",
+        Environment.NewLine,
+        TakeTail(stderr, maxLength / 2));
+    return TakeTail(combined, maxLength);
+}
+
+static string TakeTail(string text, int maxLength) =>
+    text.Length <= maxLength ? text : text[^maxLength..];
 
 static string BuildMarkdownTable(BenchmarkMetrics metrics)
 {

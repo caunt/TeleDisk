@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using TeleDisk.Application;
+using TeleDisk.Infrastructure.Telegram;
 using TeleDisk.Transport.Nbd;
 
 namespace TeleDisk;
@@ -39,6 +40,10 @@ internal sealed class TeleDiskHostedService(NbdEndpoint nbdEndpoint, VirtualDisk
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (TelegramRateLimitException exception)
+            {
+                logger.LogDebug("Periodic save deferred due to Telegram retry_after={RetryAfterSeconds}s", exception.RetryAfter.TotalSeconds);
             }
             catch (Exception exception)
             {
