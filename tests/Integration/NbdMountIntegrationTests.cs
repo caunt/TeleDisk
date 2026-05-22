@@ -3,6 +3,8 @@ using DotNet.Testcontainers.Containers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using System.Buffers.Binary;
+using System.Net.Sockets;
 using TeleDisk;
 using Xunit;
 
@@ -52,11 +54,14 @@ public sealed class NbdMountIntegrationTests
     public Task DisconnectCommand_ShouldCloseSessionsCleanly(string command) => RunInContainerAsync(command);
 
     [Theory]
-    [InlineData("qemu-img resize nbd://host.testcontainers.internal:10809 16M && qemu-img info nbd://host.testcontainers.internal:10809 | grep -F \"16 MiB\"")]
-    [InlineData("qemu-img resize --shrink nbd://host.testcontainers.internal:10809 12M && qemu-img info nbd://host.testcontainers.internal:10809 | grep -F \"12 MiB\"")]
-    public Task ResizeCommand_ShouldUpdateExportCapacity(string command) => RunInContainerAsync(command);
+    [InlineData(16L * 1024 * 1024, "16 MiB")]
+    [InlineData(12L * 1024 * 1024, "12 MiB")]
+    public async Task ResizeCommand_ShouldUpdateExportCapacity(long sizeBytes, string expectedSizeText)
+    {
+        await RunInContainerAsync($"qemu-img info nbd://{Hostname}:10809 | grep -F \"{expectedSizeText}\"", () => SendResizeCommandAsync(sizeBytes));
+    }
 
-    private static async Task RunInContainerAsync(string command)
+    private static async Task RunInContainerAsync(string command, Func<Task>? beforeContainer = null)
     {
         Assert.False(
             string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(BotTokenVariable)),
@@ -73,6 +78,11 @@ public sealed class NbdMountIntegrationTests
 
         try
         {
+            if (beforeContainer is not null)
+            {
+                await beforeContainer();
+            }
+
             var script = string.Join(";", [
                 "set -euo pipefail",
                 "apt-get update",
@@ -107,6 +117,37 @@ public sealed class NbdMountIntegrationTests
         {
             await host.StopAsync(cancellationTokenSource.Token);
         }
+    }
+
+    private static async Task SendResizeCommandAsync(long sizeBytes)
+    {
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", 10809);
+        await using var stream = client.GetStream();
+        var handshake = new byte[18];
+        await stream.ReadExactlyAsync(handshake);
+        await stream.WriteAsync(new byte[] { 0, 0, 0, 1 });
+        await WriteOptionAsync(stream, 1, "teledisk"u8.ToArray());
+        var exportInfo = new byte[10];
+        await stream.ReadExactlyAsync(exportInfo);
+        var request = new byte[28];
+        BinaryPrimitives.WriteUInt32BigEndian(request, 0x25609513);
+        BinaryPrimitives.WriteUInt16BigEndian(request.AsSpan(6), 8);
+        BinaryPrimitives.WriteUInt64BigEndian(request.AsSpan(16), checked((ulong)sizeBytes));
+        await stream.WriteAsync(request);
+        var reply = new byte[16];
+        await stream.ReadExactlyAsync(reply);
+        BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4, 4)).Should().Be(0);
+    }
+
+    private static async Task WriteOptionAsync(NetworkStream stream, uint option, byte[] payload)
+    {
+        var optionHeader = new byte[16];
+        BinaryPrimitives.WriteUInt64BigEndian(optionHeader, 0x49484156454F5054);
+        BinaryPrimitives.WriteUInt32BigEndian(optionHeader.AsSpan(8), option);
+        BinaryPrimitives.WriteUInt32BigEndian(optionHeader.AsSpan(12), checked((uint)payload.Length));
+        await stream.WriteAsync(optionHeader);
+        await stream.WriteAsync(payload);
     }
 
     private static string BuildRetryCommand(string command)

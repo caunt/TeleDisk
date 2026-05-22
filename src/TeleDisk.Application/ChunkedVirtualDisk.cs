@@ -9,6 +9,7 @@ namespace TeleDisk.Application;
 internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, VirtualDiskIndex diskIndex, ILogger<ChunkedVirtualDisk> logger)
 {
     private readonly HashSet<long> _dirtyChunkIndexes = [];
+    private readonly Dictionary<long, byte[]> _pendingChunks = [];
     private readonly SemaphoreSlim _semaphore = new(1, 1);
     private string _lastSavedIndexJson = JsonSerializer.Serialize(diskIndex);
 
@@ -35,7 +36,11 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 var chunkIndex = offset / diskIndex.ChunkSizeBytes;
                 var chunkOffset = (int)(offset % diskIndex.ChunkSizeBytes);
                 var bytesToCopy = Math.Min(destination.Length - destinationOffset, diskIndex.ChunkSizeBytes - chunkOffset);
-                if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var metadata) || metadata is not { FileId: { } fileId })
+                if (_pendingChunks.TryGetValue(chunkIndex, out var pendingChunk))
+                {
+                    pendingChunk.AsSpan(chunkOffset, bytesToCopy).CopyTo(destination.Slice(destinationOffset, bytesToCopy).Span);
+                }
+                else if (!diskIndex.Chunks.TryGetValue(chunkIndex, out var metadata) || metadata is not { FileId: { } fileId })
                 {
                     destination.Slice(destinationOffset, bytesToCopy).Span.Clear();
                 }
@@ -77,6 +82,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
 
                 var fileId = await telegramBlobStore.UploadFileAsync(chunkPayload, $"chunk-{chunkIndex}.bin", cancellationToken);
                 diskIndex.Chunks[chunkIndex] = new(fileId, hash);
+                _pendingChunks[chunkIndex] = chunkPayload;
                 _dirtyChunkIndexes.Add(chunkIndex);
                 logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
                 offset += bytesToCopy;
@@ -104,6 +110,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 if (isFullChunkWrite)
                 {
                     diskIndex.Chunks.Remove(chunkIndex);
+                    _pendingChunks.Remove(chunkIndex);
                     _dirtyChunkIndexes.Add(chunkIndex);
                     logger.LogInformation("Marked chunk {ChunkIndex} as zero", chunkIndex);
                 }
@@ -114,12 +121,14 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                     if (chunkPayload.All(static value => value == 0))
                     {
                         diskIndex.Chunks.Remove(chunkIndex);
+                        _pendingChunks.Remove(chunkIndex);
                         logger.LogInformation("Marked chunk {ChunkIndex} as zero", chunkIndex);
                     }
                     else
                     {
                         var fileId = await telegramBlobStore.UploadFileAsync(chunkPayload, $"chunk-{chunkIndex}.bin", cancellationToken);
                         diskIndex.Chunks[chunkIndex] = new(fileId, Convert.ToHexString(SHA256.HashData(chunkPayload)));
+                        _pendingChunks[chunkIndex] = chunkPayload;
                         logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
                     }
 
