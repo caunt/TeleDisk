@@ -133,6 +133,10 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             var optionLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(optionHeaderSpan[12..]));
             var optionPayload = new byte[optionLength];
             await ReadExactlyAsync(stream, optionPayload, cancellationToken);
+            if (option is NbdOptionStructuredReply or NbdOptionExtendedHeaders or NbdOptionSetMetaContext)
+            {
+                logger.LogInformation("NBD option received option={Option}", option);
+            }
 
             if (option == NbdOptionExportName)
             {
@@ -387,7 +391,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         var readData = new byte[length];
         await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
         _ = commandFlags;
-        var useStructuredReply = state.StructuredRepliesEnabled;
+        var useStructuredReply = state.StructuredRepliesEnabled || state.ExtendedHeadersEnabled;
         if (useStructuredReply)
         {
             await WriteStructuredReadReplyAsync(stream, handle, offset, readData, state.ExtendedHeadersEnabled, cancellationToken);
@@ -538,6 +542,12 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private static async Task WriteReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, bool useStructuredErrorReply, bool useExtendedHeaders, CancellationToken cancellationToken, ulong offset = 0)
     {
+        if (useExtendedHeaders && error == 0)
+        {
+            stream.Write(BuildSimpleReplyBytes(handle.Span, 0));
+            return;
+        }
+
         if (useExtendedHeaders || (error != 0 && useStructuredErrorReply))
         {
             var replyType = error == 0 ? (ushort)0 : NbdStructuredReplyTypeErrorUnknown;
