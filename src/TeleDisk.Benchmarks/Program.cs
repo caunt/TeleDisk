@@ -73,13 +73,19 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
         Console.WriteLine($"Benchmark container stderr (tail):{Environment.NewLine}{CaptureDiagnosticTail(string.Empty, stderr)}");
     }
 
-    var start = stdout.LastIndexOf('{');
-    if (start < 0)
+    string fioJson;
+    try
     {
-        throw new InvalidOperationException("fio JSON results were not found in container output.");
+        fioJson = FioJsonExtractor.ExtractSingleJsonDocument(
+            stdout,
+            BenchmarkScriptBuilder.FioJsonBeginMarker,
+            BenchmarkScriptBuilder.FioJsonEndMarker);
+    }
+    catch (InvalidOperationException exception)
+    {
+        throw new InvalidOperationException($"Failed to capture fio JSON from container output. {exception.Message}{Environment.NewLine}{CaptureDiagnosticTail(stdout, stderr)}", exception);
     }
 
-    var fioJson = stdout[start..];
     using var fioDocument = JsonDocument.Parse(fioJson);
     var jobs = fioDocument.RootElement.GetProperty("jobs");
     var read = FindMetricsSection(jobs, "read");
