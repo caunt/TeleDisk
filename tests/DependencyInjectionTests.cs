@@ -39,6 +39,26 @@ public sealed class DependencyInjectionTests
             .Equal("123456:first_token", "123456:second_token");
     });
 
+    [Fact]
+    public void AddTeleDisk_ShouldCreateScopedClientExportSessionPerScope() => WithProvider("123456:first_token", provider =>
+    {
+        using var firstScope = provider.CreateScope();
+        using var secondScope = provider.CreateScope();
+        var firstSession = firstScope.ServiceProvider.GetRequiredService<global::TeleDisk.Transport.Nbd.ClientExportSession>();
+        var secondSession = secondScope.ServiceProvider.GetRequiredService<global::TeleDisk.Transport.Nbd.ClientExportSession>();
+        firstSession.Should().NotBeSameAs(secondSession);
+    });
+
+    [Fact]
+    public void AddTeleDisk_ShouldShareSingleExportSingletonAcrossClientScopes_WhenSingleTokenProvided() => WithProvider("123456:single_token", provider =>
+    {
+        using var firstScope = provider.CreateScope();
+        using var secondScope = provider.CreateScope();
+        var firstExport = firstScope.ServiceProvider.GetRequiredService<global::TeleDisk.Transport.Nbd.ClientExportSession>().Resolve("teledisk");
+        var secondExport = secondScope.ServiceProvider.GetRequiredService<global::TeleDisk.Transport.Nbd.ClientExportSession>().Resolve("teledisk");
+        firstExport.Should().BeSameAs(secondExport);
+    });
+
     private static void WithProvider(string token, Action<ServiceProvider> assert)
     {
         WithServices(services =>
