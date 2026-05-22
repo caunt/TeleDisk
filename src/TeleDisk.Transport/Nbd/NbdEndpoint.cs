@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using TeleDisk.Application;
 using TeleDisk.Domain.Storage;
@@ -8,7 +9,7 @@ using TeleDisk.Infrastructure.Telegram;
 
 namespace TeleDisk.Transport.Nbd;
 
-internal sealed class NbdEndpoint(IExportRegistry exportRegistry, ILogger<NbdEndpoint> logger)
+internal sealed class NbdEndpoint(IExportRegistry exportRegistry, IServiceScopeFactory serviceScopeFactory, ILogger<NbdEndpoint> logger)
 {
     private long _exportSizeBytes = VirtualDiskLayout.CapacityBytes;
     private const int Port = 10809;
@@ -73,7 +74,8 @@ internal sealed class NbdEndpoint(IExportRegistry exportRegistry, ILogger<NbdEnd
                 return;
             }
 
-            var virtualDiskService = exportRegistry.Resolve(state.ExportName);
+            using var scope = serviceScopeFactory.CreateScope();
+            var virtualDiskService = scope.ServiceProvider.GetRequiredService<ClientExportSession>().Resolve(state.ExportName);
             await ServeTransmissionAsync(stream, virtualDiskService, state, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

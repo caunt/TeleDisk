@@ -23,6 +23,7 @@ internal static class DependencyInjection
         serviceCollection.AddSingleton(new TelegramBotTokenCatalog(botTokens));
         serviceCollection.AddHttpClient(nameof(TelegramBlobStore));
         serviceCollection.AddSingleton<ExportRegistry>();
+        serviceCollection.AddScoped<global::TeleDisk.Transport.Nbd.ClientExportSession>();
         serviceCollection.AddSingleton<global::TeleDisk.Transport.Nbd.IExportRegistry>(serviceProvider => serviceProvider.GetRequiredService<ExportRegistry>());
         serviceCollection.AddSingleton<NbdEndpoint>();
         serviceCollection.AddHostedService<TeleDiskHostedService>();
