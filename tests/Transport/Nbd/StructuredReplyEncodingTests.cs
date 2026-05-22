@@ -61,7 +61,7 @@ public sealed class StructuredReplyEncodingTests
         var state = new NbdConnectionState();
 
         state.StructuredRepliesEnabled.Should().BeFalse();
-        state.BlockStatusContextEnabled.Should().BeFalse();
+        state.BlockStatusContextId.Should().BeNull();
         state.ExtendedHeadersEnabled.Should().BeFalse();
     }
 }
