@@ -10,6 +10,7 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
 {
     private readonly HashSet<long> _dirtyChunkIndexes = [];
     private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private string _lastSavedIndexJson = JsonSerializer.Serialize(diskIndex);
 
     internal static async Task<ChunkedVirtualDisk> LoadAsync(TelegramBlobStore telegramBlobStore, ILogger<ChunkedVirtualDisk> logger, CancellationToken cancellationToken)
     {
@@ -66,8 +67,16 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 var bytesToCopy = Math.Min(source.Length - sourceOffset, diskIndex.ChunkSizeBytes - chunkOffset);
                 var chunkPayload = await telegramBlobStore.DownloadChunkOrZeroAsync(diskIndex.Chunks.GetValueOrDefault(chunkIndex)?.FileId, diskIndex.ChunkSizeBytes, cancellationToken);
                 source.Slice(sourceOffset, bytesToCopy).Span.CopyTo(chunkPayload.AsSpan(chunkOffset, bytesToCopy));
+                var hash = Convert.ToHexString(SHA256.HashData(chunkPayload));
+                if (diskIndex.Chunks.TryGetValue(chunkIndex, out var existingChunk) && existingChunk.Sha256 == hash)
+                {
+                    offset += bytesToCopy;
+                    sourceOffset += bytesToCopy;
+                    continue;
+                }
+
                 var fileId = await telegramBlobStore.UploadFileAsync(chunkPayload, $"chunk-{chunkIndex}.bin", cancellationToken);
-                diskIndex.Chunks[chunkIndex] = new(fileId, Convert.ToHexString(SHA256.HashData(chunkPayload)));
+                diskIndex.Chunks[chunkIndex] = new(fileId, hash);
                 _dirtyChunkIndexes.Add(chunkIndex);
                 logger.LogInformation("Saved chunk {ChunkIndex}", chunkIndex);
                 offset += bytesToCopy;
@@ -145,9 +154,17 @@ internal sealed class ChunkedVirtualDisk(TelegramBlobStore telegramBlobStore, Vi
                 return;
             }
 
+            var indexJson = JsonSerializer.Serialize(diskIndex);
+            if (indexJson == _lastSavedIndexJson)
+            {
+                _dirtyChunkIndexes.Clear();
+                return;
+            }
+
             var indexFileId = await telegramBlobStore.UploadJsonAsync(diskIndex, "disk-index.json", cancellationToken);
             await telegramBlobStore.SetIndexFileIdAsync(indexFileId, cancellationToken);
             _dirtyChunkIndexes.Clear();
+            _lastSavedIndexJson = indexJson;
             logger.LogInformation("Saved index {IndexFileId}", indexFileId);
         }
         finally
