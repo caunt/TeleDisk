@@ -29,7 +29,6 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const uint NbdFlagSendFastZero = 1 << 11;
     private const uint NbdFlagSendBlockStatus = 1 << 12;
     private const uint NbdFlagCanResize = 1 << 13;
-    private const ushort NbdCommandFlagDontFragment = 1;
     private const ushort NbdHandshakeFlagFixedNewStyle = 1;
     private const ushort NbdHandshakeFlagNoZeroes = 1 << 1;
     private const uint NbdOptionExportName = 1;
@@ -55,6 +54,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const uint NbdMetaContextBaseAllocation = 1;
     private const ushort NbdStructuredReplyTypeBlockStatus = 5;
     private const ushort NbdStructuredReplyTypeOffsetData = 1;
+    private const ushort NbdStructuredReplyTypeErrorUnknown = 0x8001;
     private const ushort NbdStructuredReplyFlagDone = 1;
     private const uint NbdStateHole = 1;
     private const uint NbdStateZero = 1 << 1;
@@ -170,8 +170,20 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                 continue;
             }
 
+            if (option == NbdOptionExtendedHeaders)
+            {
+                state = state with { ExtendedHeadersEnabled = false };
+                await WriteOptionReplyAsync(stream, option, NbdReplyTypeErrUnsupported, ReadOnlyMemory<byte>.Empty, cancellationToken);
+                continue;
+            }
+
             if (option is NbdOptionListMetaContext or NbdOptionSetMetaContext)
             {
+                if (option == NbdOptionSetMetaContext)
+                {
+                    state = state with { BlockStatusContextEnabled = IsBaseAllocationSetMetaContext(optionPayload) };
+                }
+
                 await WriteMetaContextReplyAsync(stream, option, cancellationToken);
                 await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
                 continue;
@@ -255,6 +267,11 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private async Task ServeTransmissionAsync(NetworkStream stream, NbdConnectionState state, CancellationToken cancellationToken)
     {
+        logger.LogInformation(
+            "NBD negotiation structuredRepliesEnabled={StructuredRepliesEnabled} blockStatusEnabled={BlockStatusEnabled} extendedHeadersEnabled={ExtendedHeadersEnabled}",
+            state.StructuredRepliesEnabled,
+            state.BlockStatusContextEnabled,
+            state.ExtendedHeadersEnabled);
         var requestBuffer = new byte[NbdRequestBytes];
         try
         {
@@ -360,7 +377,8 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     {
         var readData = new byte[length];
         await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
-        var useStructuredReply = state.StructuredRepliesEnabled && (commandFlags & NbdCommandFlagDontFragment) != 0;
+        _ = commandFlags;
+        var useStructuredReply = state.StructuredRepliesEnabled;
         if (useStructuredReply)
         {
             await WriteStructuredReadReplyAsync(stream, handle, offset, readData, cancellationToken);
@@ -394,7 +412,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
     private async Task HandleBlockStatusAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
     {
-        if (!state.StructuredRepliesEnabled)
+        if (!state.StructuredRepliesEnabled || !state.BlockStatusContextEnabled)
         {
             await WriteReplyAsync(stream, handle, NbdErrorNotSupported, true, cancellationToken);
             return;
@@ -454,32 +472,49 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
     }
 
-    private static async Task WriteStructuredReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, ushort replyType, ushort flags, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    internal static byte[] BuildStructuredReplyBytes(ReadOnlySpan<byte> handle, ushort replyType, ushort flags, ReadOnlySpan<byte> payload)
     {
-        var header = (stackalloc byte[NbdStructuredReplyHeaderBytes]);
+        var bytes = new byte[NbdStructuredReplyHeaderBytes + payload.Length];
+        var header = bytes.AsSpan(0, NbdStructuredReplyHeaderBytes);
         BinaryPrimitives.WriteUInt32BigEndian(header, NbdStructuredReplyMagic);
         BinaryPrimitives.WriteUInt16BigEndian(header[4..], flags);
         BinaryPrimitives.WriteUInt16BigEndian(header[6..], replyType);
-        handle.Span.CopyTo(header[8..]);
+        handle.CopyTo(header[8..]);
         BinaryPrimitives.WriteUInt32BigEndian(header[16..], checked((uint)payload.Length));
-        stream.Write(header);
-        await stream.WriteAsync(payload, cancellationToken);
+        payload.CopyTo(bytes.AsSpan(NbdStructuredReplyHeaderBytes));
+        return bytes;
+    }
+
+    private static async Task WriteStructuredReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, ushort replyType, ushort flags, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    {
+        var bytes = BuildStructuredReplyBytes(handle.Span, replyType, flags, payload.Span);
+        await stream.WriteAsync(bytes, cancellationToken);
     }
 
     private static async Task WriteStructuredReadReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
     {
-        var responsePayload = new byte[8 + payload.Length];
-        BinaryPrimitives.WriteUInt64BigEndian(responsePayload, checked((ulong)offset));
-        payload.Span.CopyTo(responsePayload.AsSpan(8));
-        await WriteStructuredReplyAsync(stream, handle, NbdStructuredReplyTypeOffsetData, NbdStructuredReplyFlagDone, responsePayload, cancellationToken);
+        await WriteStructuredReplyAsync(stream, handle, NbdStructuredReplyTypeOffsetData, NbdStructuredReplyFlagDone, BuildStructuredReadPayload(offset, payload.Span), cancellationToken);
     }
 
-    private static async Task WriteStructuredErrorReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, CancellationToken cancellationToken)
+    internal static byte[] BuildStructuredReadPayload(long offset, ReadOnlySpan<byte> payload)
+    {
+        var responsePayload = new byte[8 + payload.Length];
+        BinaryPrimitives.WriteUInt64BigEndian(responsePayload, checked((ulong)offset));
+        payload.CopyTo(responsePayload.AsSpan(8));
+        return responsePayload;
+    }
+
+    internal static byte[] BuildStructuredErrorPayload(uint error)
     {
         var payload = new byte[6];
         BinaryPrimitives.WriteUInt32BigEndian(payload, error);
         BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(4), 0);
-        await WriteStructuredReplyAsync(stream, handle, checked((ushort)(0x8000 | (ushort)error)), NbdStructuredReplyFlagDone, payload, cancellationToken);
+        return payload;
+    }
+
+    private static async Task WriteStructuredErrorReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, CancellationToken cancellationToken)
+    {
+        await WriteStructuredReplyAsync(stream, handle, NbdStructuredReplyTypeErrorUnknown, NbdStructuredReplyFlagDone, BuildStructuredErrorPayload(error), cancellationToken);
     }
 
     private static async Task WriteReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, bool useStructuredErrorReply, CancellationToken cancellationToken)
@@ -513,6 +548,17 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             throw new EndOfStreamException();
         }
     }
+
+    private static bool IsBaseAllocationSetMetaContext(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 4)
+        {
+            return false;
+        }
+
+        var queryLength = BinaryPrimitives.ReadUInt32BigEndian(payload);
+        return queryLength == 15 && payload.Length >= 19 && Encoding.UTF8.GetString(payload[4..19]) == "base:allocation";
+    }
 }
 
 internal enum NbdCommand : ushort
@@ -528,4 +574,4 @@ internal enum NbdCommand : ushort
     Resize = 8
 }
 
-internal sealed record NbdConnectionState(bool EnterTransmission = false, bool StructuredRepliesEnabled = false, bool ClientSupportsNoZeroes = false);
+internal sealed record NbdConnectionState(bool EnterTransmission = false, bool StructuredRepliesEnabled = false, bool ClientSupportsNoZeroes = false, bool BlockStatusContextEnabled = false, bool ExtendedHeadersEnabled = false);
