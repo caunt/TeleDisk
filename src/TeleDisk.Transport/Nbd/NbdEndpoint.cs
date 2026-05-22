@@ -125,15 +125,16 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             var optionPayload = new byte[optionLength];
             await ReadExactlyAsync(stream, optionPayload, cancellationToken);
 
-            if (option is NbdOptionExportName or NbdOptionGo)
+            if (option == NbdOptionExportName)
             {
-                if (option == NbdOptionGo)
-                {
-                    await WriteInfoRepliesAsync(stream, option, GetExportSizeBytes(), cancellationToken);
-                    await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
-                }
-
                 await WriteExportInfoAsync(stream, state.ClientSupportsNoZeroes, GetExportSizeBytes(), cancellationToken);
+                return state with { EnterTransmission = true };
+            }
+
+            if (option == NbdOptionGo)
+            {
+                await WriteInfoRepliesAsync(stream, option, GetExportSizeBytes(), cancellationToken);
+                await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
                 return state with { EnterTransmission = true };
             }
 
