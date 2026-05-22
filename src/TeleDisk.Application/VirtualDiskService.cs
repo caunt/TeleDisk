@@ -12,11 +12,17 @@ internal sealed class VirtualDiskService(TelegramBlobStore telegramBlobStore, IL
     private ChunkedVirtualDisk? _disk;
     private DateTimeOffset _nextAllowedSaveAt = DateTimeOffset.MinValue;
 
-    internal async Task ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken) =>
-        await (await GetDiskAsync(cancellationToken)).ReadAsync(offset, destination, cancellationToken);
+    internal async Task ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        var disk = await GetDiskAsync(cancellationToken);
+        await disk.ReadAsync(offset, destination, cancellationToken);
+    }
 
-    internal async Task WriteAsync(long offset, ReadOnlyMemory<byte> source, CancellationToken cancellationToken) =>
-        await (await GetDiskAsync(cancellationToken)).WriteAsync(offset, source, cancellationToken);
+    internal async Task WriteAsync(long offset, ReadOnlyMemory<byte> source, CancellationToken cancellationToken)
+    {
+        var disk = await GetDiskAsync(cancellationToken);
+        await disk.WriteAsync(offset, source, cancellationToken);
+    }
 
     internal async Task SaveAsync(CancellationToken cancellationToken)
     {
@@ -28,7 +34,8 @@ internal sealed class VirtualDiskService(TelegramBlobStore telegramBlobStore, IL
                 return;
             }
 
-            await (await GetDiskAsync(cancellationToken)).SaveAsync(cancellationToken);
+            var disk = await GetDiskAsync(cancellationToken);
+            await disk.SaveAsync(cancellationToken);
             _nextAllowedSaveAt = DateTimeOffset.UtcNow + SaveDebounceWindow;
         }
         catch (TelegramRateLimitException exception)
@@ -42,11 +49,17 @@ internal sealed class VirtualDiskService(TelegramBlobStore telegramBlobStore, IL
         }
     }
 
-    internal async Task WriteZeroesAsync(long offset, int length, CancellationToken cancellationToken) =>
-        await (await GetDiskAsync(cancellationToken)).WriteZeroesAsync(offset, length, cancellationToken);
+    internal async Task WriteZeroesAsync(long offset, int length, CancellationToken cancellationToken)
+    {
+        var disk = await GetDiskAsync(cancellationToken);
+        await disk.WriteZeroesAsync(offset, length, cancellationToken);
+    }
 
-    internal async ValueTask<bool> IsAllocatedAsync(long offset, CancellationToken cancellationToken) =>
-        (await GetDiskAsync(cancellationToken)).IsAllocated(offset);
+    internal async ValueTask<bool> IsAllocatedAsync(long offset, CancellationToken cancellationToken)
+    {
+        var disk = await GetDiskAsync(cancellationToken);
+        return disk.IsAllocated(offset);
+    }
 
     private async ValueTask<ChunkedVirtualDisk> GetDiskAsync(CancellationToken cancellationToken)
     {
