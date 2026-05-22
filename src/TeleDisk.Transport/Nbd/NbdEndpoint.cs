@@ -307,76 +307,20 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     throw new InvalidOperationException($"Invalid NBD request magic: 0x{BinaryPrimitives.ReadUInt32BigEndian(requestBuffer):X8}");
                 }
 
-                if (requestHeader.Offset > long.MaxValue || requestHeader.Length > int.MaxValue)
+                var validatedRequest = await TryValidateRequestAsync(stream, requestHeader, state, cancellationToken);
+                if (validatedRequest is null)
                 {
-                    await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
                     continue;
                 }
+                var (offset, length) = validatedRequest.Value;
 
-                var offset = (long)requestHeader.Offset;
-                var length = (int)requestHeader.Length;
-
-                if (length > VirtualDiskLayout.MaxChunkPayloadBytes)
+                if (requestHeader.Command == NbdCommand.Disconnect)
                 {
-                    await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
-                    continue;
+                    await SaveBestEffortAsync(cancellationToken);
+                    return;
                 }
 
-                if (!IsRangeWithinExport(offset, length, requestHeader.Command))
-                {
-                    LogReadFailure(requestHeader.Command, requestHeader.Handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
-                    await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
-                    continue;
-                }
-
-                try
-                {
-                    switch (requestHeader.Command)
-                    {
-                        case NbdCommand.Read:
-                            await HandleReadAsync(stream, requestHeader.Handle, offset, length, requestHeader.Flags, state, cancellationToken);
-                            break;
-                        case NbdCommand.Write:
-                            await HandleWriteAsync(stream, requestHeader.Handle, offset, length, state.ExtendedHeadersEnabled, cancellationToken);
-                            break;
-                        case NbdCommand.Disconnect:
-                            await SaveBestEffortAsync(cancellationToken);
-                            return;
-                        case NbdCommand.Flush:
-                            await SaveBestEffortAsync(cancellationToken);
-                            await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
-                            break;
-                        case NbdCommand.Trim:
-                        case NbdCommand.Cache:
-                            await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
-                            break;
-                        case NbdCommand.Resize:
-                            if (offset <= 0 || offset > VirtualDiskLayout.CapacityBytes)
-                            {
-                                await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
-                                break;
-                            }
-
-                            SetExportSizeBytes(offset);
-                            await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
-                            break;
-                        case NbdCommand.WriteZeroes:
-                            await virtualDiskService.WriteZeroesAsync(offset, length, cancellationToken);
-                            await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
-                            break;
-                        case NbdCommand.BlockStatus:
-                            await HandleBlockStatusAsync(stream, requestHeader.Handle, offset, length, state, cancellationToken);
-                            break;
-                        default:
-                            await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorNotSupported, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
-                            break;
-                    }
-                }
-                catch (ArgumentOutOfRangeException)
-                {
-                    LogReadFailure(requestHeader.Command, requestHeader.Handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
-                    await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
-                }
+                await ExecuteRequestAsync(stream, requestHeader, offset, length, state, cancellationToken);
             }
         }
         catch (IOException exception) when (exception.InnerException is SocketException socketException &&
@@ -384,6 +328,93 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         {
             logger.LogDebug(exception, "NBD client disconnected while awaiting reply");
         }
+    }
+
+
+    private bool TryValidateRequestHeaderRange(NbdRequestHeader requestHeader, out long offset, out int length)
+    {
+        offset = default;
+        length = default;
+        if (requestHeader.Offset > long.MaxValue || requestHeader.Length > int.MaxValue)
+        {
+            return false;
+        }
+
+        offset = (long)requestHeader.Offset;
+        length = (int)requestHeader.Length;
+        return length <= VirtualDiskLayout.MaxChunkPayloadBytes;
+    }
+
+    private async Task<(long Offset, int Length)?> TryValidateRequestAsync(NetworkStream stream, NbdRequestHeader requestHeader, NbdConnectionState state, CancellationToken cancellationToken)
+    {
+        if (!TryValidateRequestHeaderRange(requestHeader, out var offset, out var length))
+        {
+            await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
+            return null;
+        }
+
+        if (IsRangeWithinExport(offset, length, requestHeader.Command))
+        {
+            return (offset, length);
+        }
+
+        LogReadFailure(requestHeader.Command, requestHeader.Handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
+        await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
+        return null;
+    }
+
+    private async Task ExecuteRequestAsync(NetworkStream stream, NbdRequestHeader requestHeader, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
+    {
+        try
+        {
+            switch (requestHeader.Command)
+            {
+                case NbdCommand.Read:
+                    await HandleReadAsync(stream, requestHeader.Handle, offset, length, requestHeader.Flags, state, cancellationToken);
+                    return;
+                case NbdCommand.Write:
+                    await HandleWriteAsync(stream, requestHeader.Handle, offset, length, state.ExtendedHeadersEnabled, cancellationToken);
+                    return;
+                case NbdCommand.Flush:
+                    await SaveBestEffortAsync(cancellationToken);
+                    await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
+                    return;
+                case NbdCommand.Trim:
+                case NbdCommand.Cache:
+                    await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
+                    return;
+                case NbdCommand.Resize:
+                    await HandleResizeAsync(stream, requestHeader, offset, state, cancellationToken);
+                    return;
+                case NbdCommand.WriteZeroes:
+                    await virtualDiskService.WriteZeroesAsync(offset, length, cancellationToken);
+                    await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
+                    return;
+                case NbdCommand.BlockStatus:
+                    await HandleBlockStatusAsync(stream, requestHeader.Handle, offset, length, state, cancellationToken);
+                    return;
+                default:
+                    await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorNotSupported, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
+                    return;
+            }
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            LogReadFailure(requestHeader.Command, requestHeader.Handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
+            await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
+        }
+    }
+
+    private async Task HandleResizeAsync(NetworkStream stream, NbdRequestHeader requestHeader, long offset, NbdConnectionState state, CancellationToken cancellationToken)
+    {
+        if (offset <= 0 || offset > VirtualDiskLayout.CapacityBytes)
+        {
+            await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
+            return;
+        }
+
+        SetExportSizeBytes(offset);
+        await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
     }
 
     private async Task HandleReadAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, ushort commandFlags, NbdConnectionState state, CancellationToken cancellationToken)
