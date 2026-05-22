@@ -9,39 +9,39 @@ internal static class FioBenchmarkReport
         ArgumentException.ThrowIfNullOrWhiteSpace(fioJson);
         using var document = JsonDocument.Parse(fioJson);
         var jobs = document.RootElement.GetProperty("jobs");
-        var readJob = SelectJob(jobs, operationName: "read");
-        var writeJob = SelectJob(jobs, operationName: "write");
+        var readContext = SelectJob(jobs, fioJson, operationName: "read");
+        var writeContext = SelectJob(jobs, fioJson, operationName: "write");
 
-        var read = readJob.GetProperty("read");
-        var write = writeJob.GetProperty("write");
-        var writeBytes = GetNonNegativeDouble(write, "io_bytes", "write bytes", fioJson, writeJob);
-        var writeOperations = GetNonNegativeDouble(write, "total_ios", "write operations", fioJson, writeJob);
+        var read = readContext.Operation;
+        var write = writeContext.Operation;
+        var writeBytes = writeContext.GetNonNegativeDouble("io_bytes", "write bytes");
+        var writeOperations = writeContext.GetNonNegativeDouble("total_ios", "write operations");
         if (writeBytes <= 0 || writeOperations <= 0)
         {
-            throw BuildInvalidMetricException("fio reported zero write work", fioJson, writeJob);
+            throw writeContext.BuildInvalidMetricException("fio reported zero write work");
         }
 
         return new BenchmarkMetrics
         {
-            ReadBytes = GetNonNegativeDouble(read, "io_bytes", "read bytes", fioJson, readJob),
+            ReadBytes = readContext.GetNonNegativeDouble("io_bytes", "read bytes"),
             WriteBytes = writeBytes,
-            ReadOperations = GetNonNegativeDouble(read, "total_ios", "read operations", fioJson, readJob),
+            ReadOperations = readContext.GetNonNegativeDouble("total_ios", "read operations"),
             WriteOperations = writeOperations,
-            ReadRuntimeMilliseconds = GetPositiveDouble(read, "runtime", "read runtime", fioJson, readJob),
-            WriteRuntimeMilliseconds = GetPositiveDouble(write, "runtime", "write runtime", fioJson, writeJob),
-            ReadThroughputBytesPerSecond = GetPositiveDouble(read, "bw_bytes", "read throughput", fioJson, readJob),
-            WriteThroughputBytesPerSecond = GetPositiveDouble(write, "bw_bytes", "write throughput", fioJson, writeJob),
-            ReadIops = GetPositiveDouble(read, "iops", "read iops", fioJson, readJob),
-            WriteIops = GetPositiveDouble(write, "iops", "write iops", fioJson, writeJob),
-            ReadLatencyMilliseconds = GetLatencyMilliseconds(read, "read latency", fioJson, readJob),
-            WriteLatencyMilliseconds = GetLatencyMilliseconds(write, "write latency", fioJson, writeJob)
+            ReadRuntimeMilliseconds = readContext.GetPositiveDouble("runtime", "read runtime"),
+            WriteRuntimeMilliseconds = writeContext.GetPositiveDouble("runtime", "write runtime"),
+            ReadThroughputBytesPerSecond = readContext.GetPositiveDouble("bw_bytes", "read throughput"),
+            WriteThroughputBytesPerSecond = writeContext.GetPositiveDouble("bw_bytes", "write throughput"),
+            ReadIops = readContext.GetPositiveDouble("iops", "read iops"),
+            WriteIops = writeContext.GetPositiveDouble("iops", "write iops"),
+            ReadLatencyMilliseconds = readContext.GetLatencyMilliseconds("read latency"),
+            WriteLatencyMilliseconds = writeContext.GetLatencyMilliseconds("write latency")
         };
     }
 
     internal static string BuildMarkdownTable(BenchmarkMetrics metrics) =>
         BenchmarkMarkdownReportBuilder.Build(metrics);
 
-    private static JsonElement SelectJob(JsonElement jobs, string operationName)
+    private static ParseContext SelectJob(JsonElement jobs, string fioJson, string operationName)
     {
         JsonElement? fallback = null;
         foreach (var job in jobs.EnumerateArray())
@@ -52,70 +52,75 @@ internal static class FioBenchmarkReport
             }
 
             fallback ??= job;
-            var ioBytes = GetNonNegativeDouble(operation, "io_bytes", $"{operationName} bytes", jobs.ToString(), job);
-            if (ioBytes > 0)
+            var context = new ParseContext(operation, job, fioJson);
+            if (context.GetNonNegativeDouble("io_bytes", $"{operationName} bytes") > 0)
             {
-                return job;
+                return context;
             }
         }
 
-        return fallback ?? throw new InvalidOperationException($"fio is missing job section: {operationName}. jobs: {jobs}");
+        return fallback is { } selectedJob
+            ? new ParseContext(selectedJob.GetProperty(operationName), selectedJob, fioJson)
+            : throw new InvalidOperationException($"fio is missing job section: {operationName}. jobs: {jobs}");
     }
 
-    private static double GetPositiveDouble(JsonElement section, string propertyName, string metricName, string fioJson, JsonElement selectedJob)
+    private readonly record struct ParseContext(JsonElement Operation, JsonElement SelectedJob, string FioJson)
     {
-        var value = GetNonNegativeDouble(section, propertyName, metricName, fioJson, selectedJob);
-        if (value <= 0)
+        internal double GetPositiveDouble(string propertyName, string metricName)
         {
-            throw BuildInvalidMetricException($"fio reported non-positive {metricName}={value}", fioJson, selectedJob);
+            var value = GetNonNegativeDouble(propertyName, metricName);
+            if (value <= 0)
+            {
+                throw BuildInvalidMetricException($"fio reported non-positive {metricName}={value}");
+            }
+
+            return value;
         }
 
-        return value;
+        internal double GetNonNegativeDouble(string propertyName, string metricName)
+        {
+            if (!Operation.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Number)
+            {
+                throw BuildInvalidMetricException($"fio is missing numeric {metricName} ({propertyName})");
+            }
+
+            var value = property.GetDouble();
+            if (value < 0)
+            {
+                throw BuildInvalidMetricException($"fio reported negative {metricName}={value}");
+            }
+
+            return value;
+        }
+
+        internal double GetLatencyMilliseconds(string metricName)
+        {
+            if (TryGetLatencyMilliseconds("lat_ns", out var latencyMilliseconds) ||
+                TryGetLatencyMilliseconds("clat_ns", out latencyMilliseconds))
+            {
+                return latencyMilliseconds;
+            }
+
+            throw BuildInvalidMetricException($"fio is missing latency mean for {metricName}");
+        }
+
+        internal InvalidOperationException BuildInvalidMetricException(string reason) =>
+            new($"{reason}. Selected fio job: {SelectedJob}. fio: {FioJson}");
+
+        private bool TryGetLatencyMilliseconds(string propertyName, out double latencyMilliseconds)
+        {
+            latencyMilliseconds = 0;
+            if (!Operation.TryGetProperty(propertyName, out var latencySection) ||
+                !latencySection.TryGetProperty("mean", out var mean) ||
+                mean.ValueKind != JsonValueKind.Number)
+            {
+                return false;
+            }
+
+            latencyMilliseconds = mean.GetDouble() / 1_000_000;
+            return latencyMilliseconds > 0;
+        }
     }
-
-    private static double GetNonNegativeDouble(JsonElement section, string propertyName, string metricName, string fioJson, JsonElement selectedJob)
-    {
-        if (!section.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Number)
-        {
-            throw BuildInvalidMetricException($"fio is missing numeric {metricName} ({propertyName})", fioJson, selectedJob);
-        }
-
-        var value = property.GetDouble();
-        if (value < 0)
-        {
-            throw BuildInvalidMetricException($"fio reported negative {metricName}={value}", fioJson, selectedJob);
-        }
-
-        return value;
-    }
-
-    private static double GetLatencyMilliseconds(JsonElement section, string metricName, string fioJson, JsonElement selectedJob)
-    {
-        if (TryGetLatencyMilliseconds(section, "lat_ns", out var latencyMilliseconds) ||
-            TryGetLatencyMilliseconds(section, "clat_ns", out latencyMilliseconds))
-        {
-            return latencyMilliseconds;
-        }
-
-        throw BuildInvalidMetricException($"fio is missing latency mean for {metricName}", fioJson, selectedJob);
-    }
-
-    private static bool TryGetLatencyMilliseconds(JsonElement section, string propertyName, out double latencyMilliseconds)
-    {
-        latencyMilliseconds = 0;
-        if (!section.TryGetProperty(propertyName, out var latencySection) ||
-            !latencySection.TryGetProperty("mean", out var mean) ||
-            mean.ValueKind != JsonValueKind.Number)
-        {
-            return false;
-        }
-
-        latencyMilliseconds = mean.GetDouble() / 1_000_000;
-        return latencyMilliseconds > 0;
-    }
-
-    private static InvalidOperationException BuildInvalidMetricException(string reason, string fioJson, JsonElement selectedJob) =>
-        new($"{reason}. Selected fio job: {selectedJob}. fio: {fioJson}");
 }
 
 internal sealed record BenchmarkMetrics
