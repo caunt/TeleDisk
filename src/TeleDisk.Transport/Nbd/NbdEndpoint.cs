@@ -10,6 +10,7 @@ namespace TeleDisk.Transport.Nbd;
 
 internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger<NbdEndpoint> logger)
 {
+    private long _exportSizeBytes = VirtualDiskLayout.CapacityBytes;
     private const int Port = 10809;
     private const ulong NbdMagic = 0x4e42444d41474943;
     private const ulong NbdOptionMagic = 0x49484156454F5054;
@@ -128,17 +129,17 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             {
                 if (option == NbdOptionGo)
                 {
-                    await WriteInfoRepliesAsync(stream, option, cancellationToken);
+                    await WriteInfoRepliesAsync(stream, option, GetExportSizeBytes(), cancellationToken);
                     await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
                 }
 
-                await WriteExportInfoAsync(stream, state.ClientSupportsNoZeroes, cancellationToken);
+                await WriteExportInfoAsync(stream, state.ClientSupportsNoZeroes, GetExportSizeBytes(), cancellationToken);
                 return state with { EnterTransmission = true };
             }
 
             if (option == NbdOptionInfo)
             {
-                await WriteInfoRepliesAsync(stream, option, cancellationToken);
+                await WriteInfoRepliesAsync(stream, option, GetExportSizeBytes(), cancellationToken);
                 await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
                 continue;
             }
@@ -174,10 +175,10 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
     }
 
-    private static async Task WriteExportInfoAsync(NetworkStream stream, bool clientSupportsNoZeroes, CancellationToken cancellationToken)
+    private static async Task WriteExportInfoAsync(NetworkStream stream, bool clientSupportsNoZeroes, long exportSizeBytes, CancellationToken cancellationToken)
     {
         var span = (stackalloc byte[10]);
-        BinaryPrimitives.WriteUInt64BigEndian(span, unchecked((ulong)VirtualDiskLayout.CapacityBytes));
+        BinaryPrimitives.WriteUInt64BigEndian(span, unchecked((ulong)exportSizeBytes));
         BinaryPrimitives.WriteUInt16BigEndian(span[8..], (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendTrim | NbdFlagSendWriteZeroes | NbdFlagSendCache | NbdFlagSendFastZero | NbdFlagSendBlockStatus | NbdFlagCanResize));
         await stream.WriteAsync(span.ToArray(), cancellationToken);
         if (!clientSupportsNoZeroes)
@@ -186,19 +187,19 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
     }
 
-    private static async Task WriteInfoRepliesAsync(NetworkStream stream, uint option, CancellationToken cancellationToken)
+    private static async Task WriteInfoRepliesAsync(NetworkStream stream, uint option, long exportSizeBytes, CancellationToken cancellationToken)
     {
-        await WriteInfoReplyAsync(stream, option, NbdInfoExport, CreateExportInfoPayload(), cancellationToken);
+        await WriteInfoReplyAsync(stream, option, NbdInfoExport, CreateExportInfoPayload(exportSizeBytes), cancellationToken);
         await WriteInfoReplyAsync(stream, option, NbdInfoName, Encoding.UTF8.GetBytes("teledisk"), cancellationToken);
         await WriteInfoReplyAsync(stream, option, NbdInfoDescription, Encoding.UTF8.GetBytes("telegram-backed export"), cancellationToken);
         await WriteInfoReplyAsync(stream, option, NbdInfoBlockSize, CreateBlockSizePayload(), cancellationToken);
     }
 
-    private static byte[] CreateExportInfoPayload()
+    private static byte[] CreateExportInfoPayload(long exportSizeBytes)
     {
         var payload = new byte[12];
         BinaryPrimitives.WriteUInt16BigEndian(payload, NbdInfoExport);
-        BinaryPrimitives.WriteUInt64BigEndian(payload.AsSpan(2), unchecked((ulong)VirtualDiskLayout.CapacityBytes));
+        BinaryPrimitives.WriteUInt64BigEndian(payload.AsSpan(2), unchecked((ulong)exportSizeBytes));
         BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(10), (ushort)(NbdFlagHasFlags | NbdFlagSendFlush | NbdFlagSendTrim | NbdFlagSendWriteZeroes | NbdFlagSendCache | NbdFlagSendFastZero | NbdFlagSendBlockStatus | NbdFlagCanResize));
         return payload;
     }
@@ -276,36 +277,52 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     continue;
                 }
 
-                switch (command)
+                try
                 {
-                    case NbdCommand.Read:
-                        await HandleReadAsync(stream, handle, offset, length, cancellationToken);
-                        break;
-                    case NbdCommand.Write:
-                        await HandleWriteAsync(stream, handle, offset, length, cancellationToken);
-                        break;
-                    case NbdCommand.Disconnect:
-                        await virtualDiskService.SaveAsync(cancellationToken);
-                        return;
-                    case NbdCommand.Flush:
-                        await virtualDiskService.SaveAsync(cancellationToken);
-                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                        break;
-                    case NbdCommand.Trim:
-                    case NbdCommand.Cache:
-                    case NbdCommand.Resize:
-                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                        break;
-                    case NbdCommand.WriteZeroes:
-                        await virtualDiskService.WriteZeroesAsync(offset, length, cancellationToken);
-                        await WriteReplyAsync(stream, handle, 0, cancellationToken);
-                        break;
-                    case NbdCommand.BlockStatus:
-                        await HandleBlockStatusAsync(stream, handle, offset, length, state, cancellationToken);
-                        break;
-                    default:
-                        await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
-                        break;
+                    switch (command)
+                    {
+                        case NbdCommand.Read:
+                            await HandleReadAsync(stream, handle, offset, length, cancellationToken);
+                            break;
+                        case NbdCommand.Write:
+                            await HandleWriteAsync(stream, handle, offset, length, cancellationToken);
+                            break;
+                        case NbdCommand.Disconnect:
+                            await virtualDiskService.SaveAsync(cancellationToken);
+                            return;
+                        case NbdCommand.Flush:
+                            await virtualDiskService.SaveAsync(cancellationToken);
+                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            break;
+                        case NbdCommand.Trim:
+                        case NbdCommand.Cache:
+                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            break;
+                        case NbdCommand.Resize:
+                            if (offset <= 0 || offset > VirtualDiskLayout.CapacityBytes)
+                            {
+                                await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                                break;
+                            }
+
+                            SetExportSizeBytes(offset);
+                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            break;
+                        case NbdCommand.WriteZeroes:
+                            await virtualDiskService.WriteZeroesAsync(offset, length, cancellationToken);
+                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            break;
+                        case NbdCommand.BlockStatus:
+                            await HandleBlockStatusAsync(stream, handle, offset, length, state, cancellationToken);
+                            break;
+                        default:
+                            await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
+                            break;
+                    }
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
                 }
             }
         }
@@ -382,6 +399,11 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         stream.Write(span);
         await Task.CompletedTask;
     }
+
+
+    private long GetExportSizeBytes() => Interlocked.Read(ref _exportSizeBytes);
+
+    private void SetExportSizeBytes(long exportSizeBytes) => Interlocked.Exchange(ref _exportSizeBytes, exportSizeBytes);
 
     private static async Task<bool> ReadExactlyOrFalseAsync(NetworkStream stream, Memory<byte> buffer, CancellationToken cancellationToken) =>
         await stream.ReadAtLeastAsync(buffer, buffer.Length, false, cancellationToken) == buffer.Length;
