@@ -59,10 +59,9 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
         $"cat {resultsPath}"
     ]);
 
-    await using var container = new ContainerBuilder()
-        .WithImage("ubuntu:latest")
+    await using var container = new ContainerBuilder("ubuntu:latest")
         .WithPrivileged(true)
-        .WithAutoRemove(true)
+        .WithAutoRemove(false)
         .WithExtraHost(hostName, "host-gateway")
         .WithEntrypoint("bash", "-lc")
         .WithCommand(script)
@@ -70,19 +69,23 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
 
     await container.StartAsync(cancellationToken);
     var exitCode = await container.GetExitCodeAsync(cancellationToken);
-    var output = await container.GetLogsAsync();
+    var (stdout, stderr) = await container.GetLogsAsync(
+        DateTime.MinValue,
+        DateTime.MaxValue,
+        false,
+        cancellationToken);
     if (exitCode != 0)
     {
-        throw new InvalidOperationException($"Benchmark container failed with exit code {exitCode}.{Environment.NewLine}{output.Stderr}");
+        throw new InvalidOperationException($"Benchmark container failed with exit code {exitCode}.{Environment.NewLine}{stderr}");
     }
 
-    var start = output.Stdout.IndexOf('{');
+    var start = stdout.IndexOf('{');
     if (start < 0)
     {
         throw new InvalidOperationException("fio JSON results were not found in container output.");
     }
 
-    var fioJson = output.Stdout[start..];
+    var fioJson = stdout[start..];
     using var fioDocument = JsonDocument.Parse(fioJson);
     var job = fioDocument.RootElement.GetProperty("jobs")[0];
     var read = job.GetProperty("read");
