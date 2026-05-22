@@ -5,6 +5,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using TeleDisk.Application;
 using TeleDisk.Domain.Storage;
+using TeleDisk.Infrastructure.Telegram;
 
 namespace TeleDisk.Transport.Nbd;
 
@@ -53,6 +54,8 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const uint NbdMetaContextBaseAllocation = 1;
     private const ushort NbdStructuredReplyTypeBlockStatus = 5;
     private const ushort NbdStructuredReplyFlagDone = 1;
+    private const uint NbdStateHole = 1;
+    private const uint NbdStateZero = 1 << 1;
     private const int NbdRequestBytes = 28;
     private const int NbdReplyBytes = 16;
     private const int NbdOptionHeaderBytes = 16;
@@ -278,6 +281,12 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     continue;
                 }
 
+                if (!IsRangeWithinExport(offset, length, command))
+                {
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                    continue;
+                }
+
                 try
                 {
                     switch (command)
@@ -289,10 +298,10 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                             await HandleWriteAsync(stream, handle, offset, length, cancellationToken);
                             break;
                         case NbdCommand.Disconnect:
-                            await virtualDiskService.SaveAsync(cancellationToken);
+                            await SaveBestEffortAsync(cancellationToken);
                             return;
                         case NbdCommand.Flush:
-                            await virtualDiskService.SaveAsync(cancellationToken);
+                            await SaveBestEffortAsync(cancellationToken);
                             await WriteReplyAsync(stream, handle, 0, cancellationToken);
                             break;
                         case NbdCommand.Trim:
@@ -373,10 +382,33 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
         var isAllocated = await virtualDiskService.IsAllocatedAsync(offset, cancellationToken);
         var payload = new byte[12];
-        BinaryPrimitives.WriteUInt32BigEndian(payload, checked((uint)length));
-        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(4), isAllocated ? 0U : 1U);
-        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(8), NbdMetaContextBaseAllocation);
+        BinaryPrimitives.WriteUInt32BigEndian(payload, NbdMetaContextBaseAllocation);
+        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(4), checked((uint)length));
+        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(8), isAllocated ? 0U : NbdStateHole | NbdStateZero);
         await WriteStructuredReplyAsync(stream, handle, NbdStructuredReplyTypeBlockStatus, NbdStructuredReplyFlagDone, payload, cancellationToken);
+    }
+
+    private bool IsRangeWithinExport(long offset, int length, NbdCommand command)
+    {
+        if (command is NbdCommand.Disconnect or NbdCommand.Flush or NbdCommand.Cache)
+        {
+            return true;
+        }
+
+        var exportSizeBytes = GetExportSizeBytes();
+        return offset >= 0 && length >= 0 && offset <= exportSizeBytes - length;
+    }
+
+    private async Task SaveBestEffortAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await virtualDiskService.SaveAsync(cancellationToken);
+        }
+        catch (TelegramRateLimitException exception)
+        {
+            logger.LogDebug(exception, "Deferred save due to Telegram retry_after={RetryAfterSeconds}s", exception.RetryAfter.TotalSeconds);
+        }
     }
 
     private static async Task WriteStructuredReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, ushort replyType, ushort flags, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
