@@ -5,6 +5,7 @@ using DotNet.Testcontainers.Builders;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using TeleDisk;
+using TeleDisk.Benchmarks;
 
 const string botTokenVariable = "TELEGRAM_BOT_TOKEN";
 const string hostName = "host.testcontainers.internal";
@@ -45,47 +46,7 @@ static async Task<BenchmarkMetrics> RunContainerBenchmarkAsync(CancellationToken
 {
     const string resultsPath = "/tmp/fio-results.json";
     const string fioJobPath = "/tmp/tele-disk.fio";
-    var script = string.Join(";", [
-        "set -euo pipefail",
-        "apt-get update >/dev/null",
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends kmod nbd-client fio e2fsprogs util-linux >/dev/null",
-        "command -v modprobe",
-        "command -v nbd-client",
-        "command -v fio",
-        "if [ ! -b /dev/nbd0 ]; then modprobe nbd max_part=8 || true; fi",
-        "if [ ! -b /dev/nbd0 ]; then echo '/dev/nbd0 is unavailable; host kernel nbd module is not accessible from this container' >&2; exit 2; fi",
-        $"nbd-client {hostName} {nbdPort} /dev/nbd0",
-        "mkfs.ext4 -F /dev/nbd0 >/dev/null",
-        "mkdir -p /mnt/nbd",
-        "mount /dev/nbd0 /mnt/nbd",
-        $"cat > {fioJobPath} <<'EOF'",
-        "[global]",
-        "directory=/mnt/nbd",
-        "filename=benchfile",
-        "size=256m",
-        "ioengine=libaio",
-        "direct=1",
-        "time_based=1",
-        "runtime=25",
-        "ramp_time=3",
-        "bs=4k",
-        "iodepth=32",
-        "numjobs=1",
-        "group_reporting=1",
-        "invalidate=1",
-        "",
-        "[read]",
-        "rw=randread",
-        "",
-        "[write]",
-        "rw=randwrite",
-        "stonewall",
-        "EOF",
-        $"fio --output-format=json --output={resultsPath} {fioJobPath}",
-        "umount /mnt/nbd",
-        "nbd-client -d /dev/nbd0",
-        $"cat {resultsPath}"
-    ]);
+    var script = BenchmarkScriptBuilder.BuildBenchmarkScript(fioJobPath, resultsPath, hostName, nbdPort);
 
     await using var container = new ContainerBuilder("ubuntu:latest")
         .WithPrivileged(true)
