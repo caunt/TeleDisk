@@ -8,27 +8,44 @@ namespace TeleDisk;
 
 internal static class DependencyInjection
 {
+    private const char BotTokenSeparator = ',';
+
     internal static IServiceCollection AddTeleDisk(this IServiceCollection serviceCollection)
     {
-        var botToken = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
-        AddTeleDisk(serviceCollection, botToken);
+        var rawBotTokens = Environment.GetEnvironmentVariable("TELEGRAM_BOT_TOKEN");
+        AddTeleDisk(serviceCollection, rawBotTokens);
         return serviceCollection;
     }
 
-    internal static IServiceCollection AddTeleDisk(this IServiceCollection serviceCollection, string? botToken)
+    internal static IServiceCollection AddTeleDisk(this IServiceCollection serviceCollection, string? rawBotTokens)
     {
-        if (string.IsNullOrWhiteSpace(botToken))
+        var botTokens = ParseBotTokens(rawBotTokens);
+        serviceCollection.AddSingleton(new TelegramBotTokenCatalog(botTokens));
+        serviceCollection.AddHttpClient(nameof(TelegramBlobStore));
+        serviceCollection.AddSingleton<ExportRegistry>();
+        serviceCollection.AddSingleton<global::TeleDisk.Transport.Nbd.IExportRegistry>(serviceProvider => serviceProvider.GetRequiredService<ExportRegistry>());
+        serviceCollection.AddSingleton<NbdEndpoint>();
+        serviceCollection.AddHostedService<TeleDiskHostedService>();
+        return serviceCollection;
+    }
+
+    private static IReadOnlyList<TelegramBotToken> ParseBotTokens(string? rawBotTokens)
+    {
+        if (string.IsNullOrWhiteSpace(rawBotTokens))
         {
             throw new InvalidOperationException("TELEGRAM_BOT_TOKEN is not set.");
         }
 
-        serviceCollection.AddSingleton(new TelegramBotToken(botToken));
-        serviceCollection.AddSingleton(serviceProvider => new TelegramBotClient(serviceProvider.GetRequiredService<TelegramBotToken>().Value));
-        serviceCollection.AddHttpClient(nameof(TelegramBlobStore));
-        serviceCollection.AddSingleton<TelegramBlobStore>();
-        serviceCollection.AddSingleton<VirtualDiskService>();
-        serviceCollection.AddSingleton<NbdEndpoint>();
-        serviceCollection.AddHostedService<TeleDiskHostedService>();
-        return serviceCollection;
+        var botTokens = rawBotTokens
+            .Split(BotTokenSeparator, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => new TelegramBotToken(value))
+            .ToArray();
+
+        if (botTokens.Length == 0)
+        {
+            throw new InvalidOperationException("TELEGRAM_BOT_TOKEN is not set.");
+        }
+
+        return botTokens;
     }
 }

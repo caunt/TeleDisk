@@ -8,7 +8,7 @@ using TeleDisk.Infrastructure.Telegram;
 
 namespace TeleDisk.Transport.Nbd;
 
-internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger<NbdEndpoint> logger)
+internal sealed class NbdEndpoint(IExportRegistry exportRegistry, ILogger<NbdEndpoint> logger)
 {
     private long _exportSizeBytes = VirtualDiskLayout.CapacityBytes;
     private const int Port = 10809;
@@ -50,17 +50,9 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         {
             while (true)
             {
-                using var client = await listener.AcceptTcpClientAsync(cancellationToken);
+                var client = await listener.AcceptTcpClientAsync(cancellationToken);
                 client.NoDelay = true;
-
-                try
-                {
-                    await HandleClientAsync(client, cancellationToken);
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    logger.LogWarning(exception, "NBD client session ended with an error");
-                }
+                _ = Task.Run(() => HandleClientSessionAsync(client, cancellationToken), cancellationToken);
             }
         }
         finally
@@ -69,22 +61,33 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
     }
 
-    private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
+    private async Task HandleClientSessionAsync(TcpClient client, CancellationToken cancellationToken)
     {
-        await using var stream = client.GetStream();
-        var state = await NegotiateNewStyleAsync(stream, cancellationToken);
-        if (state.EnterTransmission)
+        using var disposableClient = client;
+        await using var stream = disposableClient.GetStream();
+        try
         {
-            await ServeTransmissionAsync(stream, state, cancellationToken);
+            var state = await NegotiateNewStyleAsync(stream, cancellationToken);
+            if (!state.EnterTransmission)
+            {
+                return;
+            }
+
+            var virtualDiskService = exportRegistry.Resolve(state.ExportName);
+            await ServeTransmissionAsync(stream, virtualDiskService, state, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "NBD client session ended with an error");
         }
     }
 
     private Task<NbdConnectionState> NegotiateNewStyleAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
-        return new NbdHandshakeNegotiator(logger, GetExportSizeBytes).NegotiateAsync(stream, cancellationToken);
+        return new NbdHandshakeNegotiator(logger, GetExportSizeBytes, exportRegistry.GetExportNames).NegotiateAsync(stream, cancellationToken);
     }
 
-    private async Task ServeTransmissionAsync(NetworkStream stream, NbdConnectionState state, CancellationToken cancellationToken)
+    private async Task ServeTransmissionAsync(NetworkStream stream, VirtualDiskService virtualDiskService, NbdConnectionState state, CancellationToken cancellationToken)
     {
         state = state with
         {
@@ -120,11 +123,11 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
                 if (requestHeader.Command == NbdCommand.Disconnect)
                 {
-                    await SaveBestEffortAsync(cancellationToken);
+                    await SaveBestEffortAsync(virtualDiskService, cancellationToken);
                     return;
                 }
 
-                await ExecuteRequestAsync(stream, requestHeader, offset, length, state, cancellationToken);
+                await ExecuteRequestAsync(stream, virtualDiskService, requestHeader, offset, length, state, cancellationToken);
             }
         }
         catch (IOException exception) when (exception.InnerException is SocketException socketException &&
@@ -167,20 +170,20 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         return null;
     }
 
-    private async Task ExecuteRequestAsync(NetworkStream stream, NbdRequestHeader requestHeader, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
+    private async Task ExecuteRequestAsync(NetworkStream stream, VirtualDiskService virtualDiskService, NbdRequestHeader requestHeader, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
     {
         try
         {
             switch (requestHeader.Command)
             {
                 case NbdCommand.Read:
-                    await HandleReadAsync(stream, requestHeader.Handle, offset, length, requestHeader.Flags, state, cancellationToken);
+                    await HandleReadAsync(stream, virtualDiskService, requestHeader.Handle, offset, length, requestHeader.Flags, state, cancellationToken);
                     return;
                 case NbdCommand.Write:
-                    await HandleWriteAsync(stream, requestHeader.Handle, offset, length, state.ExtendedHeadersEnabled, cancellationToken);
+                    await HandleWriteAsync(stream, virtualDiskService, requestHeader.Handle, offset, length, state.ExtendedHeadersEnabled, cancellationToken);
                     return;
                 case NbdCommand.Flush:
-                    await SaveBestEffortAsync(cancellationToken);
+                    await SaveBestEffortAsync(virtualDiskService, cancellationToken);
                     await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
                     return;
                 case NbdCommand.Trim:
@@ -195,7 +198,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
                     return;
                 case NbdCommand.BlockStatus:
-                    await HandleBlockStatusAsync(stream, requestHeader.Handle, offset, length, state, cancellationToken);
+                    await HandleBlockStatusAsync(stream, virtualDiskService, requestHeader.Handle, offset, length, state, cancellationToken);
                     return;
                 default:
                     await WriteReplyAsync(stream, requestHeader.Handle, NbdErrorNotSupported, state.StructuredRepliesEnabled, state.ExtendedHeadersEnabled, cancellationToken);
@@ -221,7 +224,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         await WriteReplyAsync(stream, requestHeader.Handle, 0, false, state.ExtendedHeadersEnabled, cancellationToken);
     }
 
-    private async Task HandleReadAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, ushort commandFlags, NbdConnectionState state, CancellationToken cancellationToken)
+    private async Task HandleReadAsync(NetworkStream stream, VirtualDiskService virtualDiskService, ReadOnlyMemory<byte> handle, long offset, int length, ushort commandFlags, NbdConnectionState state, CancellationToken cancellationToken)
     {
         var readData = new byte[length];
         await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
@@ -237,7 +240,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         await stream.WriteAsync(readData, cancellationToken);
     }
 
-    private async Task HandleWriteAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, bool useExtendedHeaders, CancellationToken cancellationToken)
+    private async Task HandleWriteAsync(NetworkStream stream, VirtualDiskService virtualDiskService, ReadOnlyMemory<byte> handle, long offset, int length, bool useExtendedHeaders, CancellationToken cancellationToken)
     {
         var writeData = new byte[length];
         await ReadExactlyAsync(stream, writeData, cancellationToken);
@@ -258,7 +261,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         await WriteReplyAsync(stream, handle, NbdErrorNotSupported, false, false, cancellationToken);
     }
 
-    private async Task HandleBlockStatusAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
+    private async Task HandleBlockStatusAsync(NetworkStream stream, VirtualDiskService virtualDiskService, ReadOnlyMemory<byte> handle, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
     {
         if (!state.StructuredRepliesEnabled || state.BlockStatusContextId is null)
         {
@@ -308,7 +311,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             errorCode);
     }
 
-    private async Task SaveBestEffortAsync(CancellationToken cancellationToken)
+    private async Task SaveBestEffortAsync(VirtualDiskService virtualDiskService, CancellationToken cancellationToken)
     {
         try
         {
@@ -407,4 +410,4 @@ internal enum NbdCommand : ushort
 
 internal readonly record struct NbdRequestHeader(ushort Flags, NbdCommand Command, ReadOnlyMemory<byte> Handle, ulong Offset, ulong Length);
 
-internal sealed record NbdConnectionState(bool EnterTransmission = false, bool StructuredRepliesEnabled = false, bool ClientSupportsNoZeroes = false, uint? BlockStatusContextId = null, bool ExtendedHeadersEnabled = false);
+internal sealed record NbdConnectionState(bool EnterTransmission = false, bool StructuredRepliesEnabled = false, bool ClientSupportsNoZeroes = false, uint? BlockStatusContextId = null, bool ExtendedHeadersEnabled = false, string ExportName = "teledisk");

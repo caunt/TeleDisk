@@ -1,12 +1,11 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using TeleDisk.Application;
 using TeleDisk.Infrastructure.Telegram;
 using TeleDisk.Transport.Nbd;
 
 namespace TeleDisk;
 
-internal sealed class TeleDiskHostedService(NbdEndpoint nbdEndpoint, VirtualDiskService virtualDiskService, ILogger<TeleDiskHostedService> logger) : BackgroundService
+internal sealed class TeleDiskHostedService(NbdEndpoint nbdEndpoint, ExportRegistry exportRegistry, ILogger<TeleDiskHostedService> logger) : BackgroundService
 {
     private static readonly TimeSpan SaveInterval = TimeSpan.FromSeconds(30);
 
@@ -35,7 +34,7 @@ internal sealed class TeleDiskHostedService(NbdEndpoint nbdEndpoint, VirtualDisk
             try
             {
                 await Task.Delay(SaveInterval, cancellationToken);
-                await virtualDiskService.SaveAsync(cancellationToken);
+                await SaveAllAsync(cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -52,11 +51,14 @@ internal sealed class TeleDiskHostedService(NbdEndpoint nbdEndpoint, VirtualDisk
         }
     }
 
+    private Task SaveAllAsync(CancellationToken cancellationToken) =>
+        Task.WhenAll(exportRegistry.GetExportNames().Select(exportName => exportRegistry.Resolve(exportName).SaveAsync(cancellationToken)));
+
     private async Task SaveOnShutdownAsync()
     {
         try
         {
-            await virtualDiskService.SaveAsync(CancellationToken.None);
+            await SaveAllAsync(CancellationToken.None);
         }
         catch (Exception exception)
         {

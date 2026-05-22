@@ -6,7 +6,7 @@ using TeleDisk.Domain.Storage;
 
 namespace TeleDisk.Transport.Nbd;
 
-internal sealed class NbdHandshakeNegotiator(ILogger<NbdEndpoint> logger, Func<long> getExportSizeBytes)
+internal sealed class NbdHandshakeNegotiator(ILogger<NbdEndpoint> logger, Func<long> getExportSizeBytes, Func<IReadOnlyList<string>> getExportNames)
 {
     private const ulong NbdMagic = 0x4e42444d41474943;
     private const ulong NbdOptionMagic = 0x49484156454F5054;
@@ -78,15 +78,17 @@ internal sealed class NbdHandshakeNegotiator(ILogger<NbdEndpoint> logger, Func<l
 
             if (option == NbdOptionExportName)
             {
+                var exportName = Encoding.UTF8.GetString(optionPayload);
                 await WriteExportInfoAsync(stream, state.ClientSupportsNoZeroes, getExportSizeBytes(), cancellationToken);
-                return state with { EnterTransmission = true };
+                return state with { EnterTransmission = true, ExportName = exportName };
             }
 
             if (option == NbdOptionGo)
             {
+                var exportName = ParseExportNameFromGoPayload(optionPayload);
                 await WriteInfoRepliesAsync(stream, option, getExportSizeBytes(), cancellationToken);
                 await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
-                return state with { EnterTransmission = true };
+                return state with { EnterTransmission = true, ExportName = exportName };
             }
 
             if (option == NbdOptionInfo)
@@ -104,7 +106,7 @@ internal sealed class NbdHandshakeNegotiator(ILogger<NbdEndpoint> logger, Func<l
 
             if (option == NbdOptionList)
             {
-                await WriteExportListReplyAsync(stream, option, cancellationToken);
+                await WriteExportListReplyAsync(stream, option, getExportNames(), cancellationToken);
                 await WriteOptionReplyAsync(stream, option, NbdReplyTypeAck, ReadOnlyMemory<byte>.Empty, cancellationToken);
                 continue;
             }
@@ -182,8 +184,29 @@ internal sealed class NbdHandshakeNegotiator(ILogger<NbdEndpoint> logger, Func<l
         return payload;
     }
 
-    private static Task WriteExportListReplyAsync(NetworkStream stream, uint option, CancellationToken cancellationToken) =>
-        WriteOptionReplyAsync(stream, option, NbdReplyTypeServer, Encoding.UTF8.GetBytes("teledisk"), cancellationToken);
+    private static async Task WriteExportListReplyAsync(NetworkStream stream, uint option, IReadOnlyList<string> exportNames, CancellationToken cancellationToken)
+    {
+        foreach (var exportName in exportNames)
+        {
+            await WriteOptionReplyAsync(stream, option, NbdReplyTypeServer, Encoding.UTF8.GetBytes(exportName), cancellationToken);
+        }
+    }
+
+    private static string ParseExportNameFromGoPayload(byte[] optionPayload)
+    {
+        if (optionPayload.Length < 4)
+        {
+            return "teledisk";
+        }
+
+        var exportNameLength = (int)BinaryPrimitives.ReadUInt32BigEndian(optionPayload);
+        if (exportNameLength <= 0 || exportNameLength > optionPayload.Length - 4)
+        {
+            return "teledisk";
+        }
+
+        return Encoding.UTF8.GetString(optionPayload.AsSpan(4, exportNameLength));
+    }
 
     private static Task WriteMetaContextReplyAsync(NetworkStream stream, uint option, CancellationToken cancellationToken)
     {

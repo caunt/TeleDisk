@@ -5,6 +5,12 @@ namespace TeleDisk.Infrastructure.Telegram;
 internal sealed record TelegramBotToken(string Value);
 
 
+internal sealed record TelegramBotTokenCatalog(IReadOnlyList<TelegramBotToken> Tokens)
+{
+    internal TelegramBotToken DefaultToken => Tokens[0];
+}
+
+
 internal sealed record TelegramBotDescription([property: JsonPropertyName("description")] string Description);
 
 
