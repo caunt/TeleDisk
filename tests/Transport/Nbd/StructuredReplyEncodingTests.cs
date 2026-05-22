@@ -56,14 +56,38 @@ public sealed class StructuredReplyEncodingTests
     }
 
     [Fact]
+    public void BuildSimpleReplyBytes_Success_WritesExpectedBytes()
+    {
+        var handle = Enumerable.Range(1, 8).Select(static value => (byte)value).ToArray();
+
+        var reply = NbdEndpoint.BuildSimpleReplyBytes(handle, 0);
+
+        BinaryPrimitives.ReadUInt32BigEndian(reply).Should().Be(0x67446698);
+        BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4)).Should().Be(0);
+        reply[8..16].Should().Equal(handle);
+    }
+
+    [Fact]
+    public void BuildSimpleReplyBytes_Error_WritesExpectedBytes()
+    {
+        var handle = Enumerable.Range(1, 8).Select(static value => (byte)value).ToArray();
+
+        var reply = NbdEndpoint.BuildSimpleReplyBytes(handle, 22);
+
+        BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(4)).Should().Be(22);
+    }
+
+    [Fact]
     public void BuildStructuredReplyBytes_ExtendedHeaders_WritesExtendedPayloadLength()
     {
         var handle = Enumerable.Range(1, 8).Select(static value => (byte)value).ToArray();
         var payload = new byte[12];
-        var reply = NbdEndpoint.BuildStructuredReplyBytes(handle, 5, 1, payload, true);
+        var reply = NbdEndpoint.BuildStructuredReplyBytes(handle, 5, 1, payload, true, 4096);
 
-        reply.Length.Should().Be(24 + payload.Length);
-        BinaryPrimitives.ReadUInt64BigEndian(reply.AsSpan(16)).Should().Be(12);
+        reply.Length.Should().Be(32 + payload.Length);
+        BinaryPrimitives.ReadUInt32BigEndian(reply).Should().Be(0x6e8a278c);
+        BinaryPrimitives.ReadUInt64BigEndian(reply.AsSpan(16)).Should().Be(4096);
+        BinaryPrimitives.ReadUInt64BigEndian(reply.AsSpan(24)).Should().Be(12);
     }
 
     [Fact]
