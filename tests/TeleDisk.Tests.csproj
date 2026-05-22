@@ -17,5 +17,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../src/TeleDisk.Host/TeleDisk.Host.csproj" />
+    <ProjectReference Include="../src/TeleDisk.Benchmarks/TeleDisk.Benchmarks.csproj" />
   </ItemGroup>
 </Project>
