@@ -9,17 +9,62 @@ internal sealed class TelegramBlobStore(TelegramBotClient telegramBotClient, IHt
     private const string StorageChatId = "@CauntHermesBot";
     private const string IndexDescriptionPrefix = "tg-nbd-index:";
     private readonly HttpClient _httpClient = httpClientFactory.CreateClient(nameof(TelegramBlobStore));
+    private readonly SemaphoreSlim _descriptionSemaphore = new(1, 1);
+    private string? _cachedDescription;
+    private DateTimeOffset _nextDescriptionUpdateAt;
 
     internal async Task<string?> GetIndexFileIdAsync(CancellationToken cancellationToken)
     {
-        var description = await GetBotDescriptionAsync(cancellationToken);
+        var description = await GetBotDescriptionCachedAsync(cancellationToken);
         return description.StartsWith(IndexDescriptionPrefix, StringComparison.Ordinal)
             ? description[IndexDescriptionPrefix.Length..].Trim()
             : null;
     }
 
-    internal Task SetIndexFileIdAsync(string fileId, CancellationToken cancellationToken) =>
-        SetBotDescriptionAsync($"{IndexDescriptionPrefix}{fileId}", cancellationToken);
+    internal async Task SetIndexFileIdAsync(string fileId, CancellationToken cancellationToken)
+    {
+        var description = $"{IndexDescriptionPrefix}{fileId}";
+        await _descriptionSemaphore.WaitAsync(cancellationToken);
+        try
+        {
+            if (_cachedDescription == description || DateTimeOffset.UtcNow < _nextDescriptionUpdateAt)
+            {
+                return;
+            }
+
+            await SetBotDescriptionAsync(description, cancellationToken);
+            _cachedDescription = description;
+            _nextDescriptionUpdateAt = DateTimeOffset.MinValue;
+        }
+        catch (TelegramRateLimitException exception)
+        {
+            _nextDescriptionUpdateAt = DateTimeOffset.UtcNow + exception.RetryAfter;
+            throw;
+        }
+        finally
+        {
+            _descriptionSemaphore.Release();
+        }
+    }
+
+    private async Task<string> GetBotDescriptionCachedAsync(CancellationToken cancellationToken)
+    {
+        await _descriptionSemaphore.WaitAsync(cancellationToken);
+        try
+        {
+            if (_cachedDescription is not null)
+            {
+                return _cachedDescription;
+            }
+
+            _cachedDescription = await GetBotDescriptionAsync(cancellationToken);
+            return _cachedDescription;
+        }
+        finally
+        {
+            _descriptionSemaphore.Release();
+        }
+    }
 
     internal async Task<string> UploadFileAsync(ReadOnlyMemory<byte> payload, string fileName, CancellationToken cancellationToken)
     {
