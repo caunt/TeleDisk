@@ -29,6 +29,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const uint NbdFlagSendFastZero = 1 << 11;
     private const uint NbdFlagSendBlockStatus = 1 << 12;
     private const uint NbdFlagCanResize = 1 << 13;
+    private const ushort NbdCommandFlagDontFragment = 1;
     private const ushort NbdHandshakeFlagFixedNewStyle = 1;
     private const ushort NbdHandshakeFlagNoZeroes = 1 << 1;
     private const uint NbdOptionExportName = 1;
@@ -53,6 +54,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
     private const ushort NbdInfoBlockSize = 3;
     private const uint NbdMetaContextBaseAllocation = 1;
     private const ushort NbdStructuredReplyTypeBlockStatus = 5;
+    private const ushort NbdStructuredReplyTypeOffsetData = 1;
     private const ushort NbdStructuredReplyFlagDone = 1;
     private const uint NbdStateHole = 1;
     private const uint NbdStateZero = 1 << 1;
@@ -270,13 +272,14 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     throw new InvalidOperationException($"Invalid NBD request magic: 0x{magic:X8}");
                 }
 
+                var commandFlags = BinaryPrimitives.ReadUInt16BigEndian(requestSpan[4..]);
                 var command = (NbdCommand)(BinaryPrimitives.ReadUInt16BigEndian(requestSpan[6..]));
                 var handle = requestBuffer.AsMemory(8, 8);
                 var requestOffset = BinaryPrimitives.ReadUInt64BigEndian(requestSpan[16..]);
                 var requestLength = BinaryPrimitives.ReadUInt32BigEndian(requestSpan[24..]);
                 if (requestOffset > long.MaxValue || requestLength > int.MaxValue)
                 {
-                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, cancellationToken);
                     continue;
                 }
 
@@ -285,14 +288,14 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
                 if (length > VirtualDiskLayout.MaxChunkPayloadBytes)
                 {
-                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, cancellationToken);
                     continue;
                 }
 
                 if (!IsRangeWithinExport(offset, length, command))
                 {
                     LogReadFailure(command, handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
-                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, cancellationToken);
                     continue;
                 }
 
@@ -301,7 +304,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                     switch (command)
                     {
                         case NbdCommand.Read:
-                            await HandleReadAsync(stream, handle, offset, length, cancellationToken);
+                            await HandleReadAsync(stream, handle, offset, length, commandFlags, state, cancellationToken);
                             break;
                         case NbdCommand.Write:
                             await HandleWriteAsync(stream, handle, offset, length, cancellationToken);
@@ -311,38 +314,38 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                             return;
                         case NbdCommand.Flush:
                             await SaveBestEffortAsync(cancellationToken);
-                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            await WriteReplyAsync(stream, handle, 0, false, cancellationToken);
                             break;
                         case NbdCommand.Trim:
                         case NbdCommand.Cache:
-                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            await WriteReplyAsync(stream, handle, 0, false, cancellationToken);
                             break;
                         case NbdCommand.Resize:
                             if (offset <= 0 || offset > VirtualDiskLayout.CapacityBytes)
                             {
-                                await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                                await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, cancellationToken);
                                 break;
                             }
 
                             SetExportSizeBytes(offset);
-                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            await WriteReplyAsync(stream, handle, 0, false, cancellationToken);
                             break;
                         case NbdCommand.WriteZeroes:
                             await virtualDiskService.WriteZeroesAsync(offset, length, cancellationToken);
-                            await WriteReplyAsync(stream, handle, 0, cancellationToken);
+                            await WriteReplyAsync(stream, handle, 0, false, cancellationToken);
                             break;
                         case NbdCommand.BlockStatus:
                             await HandleBlockStatusAsync(stream, handle, offset, length, state, cancellationToken);
                             break;
                         default:
-                            await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
+                            await WriteReplyAsync(stream, handle, NbdErrorNotSupported, state.StructuredRepliesEnabled, cancellationToken);
                             break;
                     }
                 }
                 catch (ArgumentOutOfRangeException)
                 {
                     LogReadFailure(command, handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
-                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, state.StructuredRepliesEnabled, cancellationToken);
                 }
             }
         }
@@ -353,11 +356,18 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
     }
 
-    private async Task HandleReadAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, CancellationToken cancellationToken)
+    private async Task HandleReadAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, ushort commandFlags, NbdConnectionState state, CancellationToken cancellationToken)
     {
         var readData = new byte[length];
         await virtualDiskService.ReadAsync(offset, readData, cancellationToken);
-        await WriteReplyAsync(stream, handle, 0, cancellationToken);
+        var useStructuredReply = state.StructuredRepliesEnabled && (commandFlags & NbdCommandFlagDontFragment) != 0;
+        if (useStructuredReply)
+        {
+            await WriteStructuredReadReplyAsync(stream, handle, offset, readData, cancellationToken);
+            return;
+        }
+
+        await WriteReplyAsync(stream, handle, 0, false, cancellationToken);
         await stream.WriteAsync(readData, cancellationToken);
     }
 
@@ -366,7 +376,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         var writeData = new byte[length];
         await ReadExactlyAsync(stream, writeData, cancellationToken);
         await virtualDiskService.WriteAsync(offset, writeData, cancellationToken);
-        await WriteReplyAsync(stream, handle, 0, cancellationToken);
+        await WriteReplyAsync(stream, handle, 0, false, cancellationToken);
     }
 
     private static async Task DrainAndReplyNotSupportedAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, int payloadLength, CancellationToken cancellationToken)
@@ -379,14 +389,14 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             drainedBytes += toRead;
         }
 
-        await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
+        await WriteReplyAsync(stream, handle, NbdErrorNotSupported, false, cancellationToken);
     }
 
     private async Task HandleBlockStatusAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, int length, NbdConnectionState state, CancellationToken cancellationToken)
     {
         if (!state.StructuredRepliesEnabled)
         {
-            await WriteReplyAsync(stream, handle, NbdErrorNotSupported, cancellationToken);
+            await WriteReplyAsync(stream, handle, NbdErrorNotSupported, true, cancellationToken);
             return;
         }
 
@@ -421,7 +431,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
             return;
         }
 
-        logger.LogDebug(
+        logger.LogWarning(
             "NBD read failed command={Command} handle={Handle} offset={Offset} length={Length} exportSize={ExportSize} negotiatedStructuredReplies={StructuredReplies} errorCode={ErrorCode}",
             command,
             Convert.ToHexString(handle),
@@ -456,8 +466,30 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         await stream.WriteAsync(payload, cancellationToken);
     }
 
-    private static async Task WriteReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, CancellationToken cancellationToken)
+    private static async Task WriteStructuredReadReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, long offset, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
     {
+        var responsePayload = new byte[8 + payload.Length];
+        BinaryPrimitives.WriteUInt64BigEndian(responsePayload, checked((ulong)offset));
+        payload.Span.CopyTo(responsePayload.AsSpan(8));
+        await WriteStructuredReplyAsync(stream, handle, NbdStructuredReplyTypeOffsetData, NbdStructuredReplyFlagDone, responsePayload, cancellationToken);
+    }
+
+    private static async Task WriteStructuredErrorReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, CancellationToken cancellationToken)
+    {
+        var payload = new byte[6];
+        BinaryPrimitives.WriteUInt32BigEndian(payload, error);
+        BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(4), 0);
+        await WriteStructuredReplyAsync(stream, handle, checked((ushort)(0x8000 | (ushort)error)), NbdStructuredReplyFlagDone, payload, cancellationToken);
+    }
+
+    private static async Task WriteReplyAsync(NetworkStream stream, ReadOnlyMemory<byte> handle, uint error, bool useStructuredErrorReply, CancellationToken cancellationToken)
+    {
+        if (error != 0 && useStructuredErrorReply)
+        {
+            await WriteStructuredErrorReplyAsync(stream, handle, error, cancellationToken);
+            return;
+        }
+
         var span = (stackalloc byte[NbdReplyBytes]);
         BinaryPrimitives.WriteUInt32BigEndian(span, NbdReplyMagic);
         BinaryPrimitives.WriteUInt32BigEndian(span[4..], error);
