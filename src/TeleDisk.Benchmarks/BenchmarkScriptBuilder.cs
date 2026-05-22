@@ -2,6 +2,10 @@ namespace TeleDisk.Benchmarks;
 
 internal static class BenchmarkScriptBuilder
 {
+    internal const string FioJsonBeginMarker = "__TELEDISK_FIO_JSON_BEGIN__";
+
+    internal const string FioJsonEndMarker = "__TELEDISK_FIO_JSON_END__";
+
     internal static string BuildBenchmarkScript(string fioJobPath, string resultsPath, string hostName, int nbdPort)
     {
         var escapedFioConfig = string.Join("' '", BuildFioConfig().Select(line => line.Replace("'", "'\"'\"'")));
@@ -22,7 +26,9 @@ internal static class BenchmarkScriptBuilder
             $"fio --output-format=json --output={resultsPath} {fioJobPath}",
             "umount /mnt/nbd",
             "nbd-client -d /dev/nbd0",
-            $"cat {resultsPath}"
+            $"echo {FioJsonBeginMarker}",
+            $"cat {resultsPath}",
+            $"echo {FioJsonEndMarker}"
         ]);
     }
 

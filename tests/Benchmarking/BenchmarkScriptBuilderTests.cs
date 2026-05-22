@@ -41,5 +41,7 @@ public sealed class BenchmarkScriptBuilderTests
         script.Should().NotContain("<<'EOF'");
         script.Should().NotContain("EOF");
         script.Should().Contain("fio --output-format=json --output=/tmp/fio-results.json /tmp/tele-disk.fio");
+        script.Should().Contain($"echo {BenchmarkScriptBuilder.FioJsonBeginMarker}");
+        script.Should().Contain($"echo {BenchmarkScriptBuilder.FioJsonEndMarker}");
     }
 }
