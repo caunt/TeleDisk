@@ -56,6 +56,17 @@ public sealed class StructuredReplyEncodingTests
     }
 
     [Fact]
+    public void BuildStructuredReplyBytes_ExtendedHeaders_WritesExtendedPayloadLength()
+    {
+        var handle = Enumerable.Range(1, 8).Select(static value => (byte)value).ToArray();
+        var payload = new byte[12];
+        var reply = NbdEndpoint.BuildStructuredReplyBytes(handle, 5, 1, payload, true);
+
+        reply.Length.Should().Be(24 + payload.Length);
+        BinaryPrimitives.ReadUInt64BigEndian(reply.AsSpan(16)).Should().Be(12);
+    }
+
+    [Fact]
     public void ConnectionState_DefaultsToStructuredAndExtendedHeadersDisabled()
     {
         var state = new NbdConnectionState();
