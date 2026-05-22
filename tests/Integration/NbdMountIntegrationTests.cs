@@ -37,8 +37,8 @@ public sealed class NbdMountIntegrationTests
     public Task FlushCommand_ShouldAcknowledgeWrites(string command) => RunInContainerAsync(command);
 
     [Theory]
-    [InlineData("qemu-io -f raw -c \"write -P 0xcc 28672 1024\" -c \"map 28672 1024\" nbd://host.testcontainers.internal:10809 | grep -E \"allocated|present\"")]
-    [InlineData("qemu-io -f raw -c \"write -z 32768 1024\" -c \"map 32768 1024\" nbd://host.testcontainers.internal:10809 | grep -E \"zero|allocated|present\"")]
+    [InlineData("qemu-io -f raw -c \"write -P 0xcc 28672 1024\" -c \"map\" nbd://host.testcontainers.internal:10809 | grep -E \"allocated|present\"")]
+    [InlineData("qemu-io -f raw -c \"write -z 32768 1024\" -c \"map\" nbd://host.testcontainers.internal:10809 | grep -E \"zero|allocated|present\"")]
     public Task BlockStatusCommand_ShouldReportExtentState(string command) => RunInContainerAsync(command);
 
     [Theory]
