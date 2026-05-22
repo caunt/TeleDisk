@@ -272,8 +272,16 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
                 var command = (NbdCommand)(BinaryPrimitives.ReadUInt16BigEndian(requestSpan[6..]));
                 var handle = requestBuffer.AsMemory(8, 8);
-                var offset = checked((long)BinaryPrimitives.ReadUInt64BigEndian(requestSpan[16..]));
-                var length = checked((int)BinaryPrimitives.ReadUInt32BigEndian(requestSpan[24..]));
+                var requestOffset = BinaryPrimitives.ReadUInt64BigEndian(requestSpan[16..]);
+                var requestLength = BinaryPrimitives.ReadUInt32BigEndian(requestSpan[24..]);
+                if (requestOffset > long.MaxValue || requestLength > int.MaxValue)
+                {
+                    await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
+                    continue;
+                }
+
+                var offset = (long)requestOffset;
+                var length = (int)requestLength;
 
                 if (length > VirtualDiskLayout.MaxChunkPayloadBytes)
                 {
@@ -283,6 +291,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
 
                 if (!IsRangeWithinExport(offset, length, command))
                 {
+                    LogReadFailure(command, handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
                     await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
                     continue;
                 }
@@ -332,6 +341,7 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
                 }
                 catch (ArgumentOutOfRangeException)
                 {
+                    LogReadFailure(command, handle.Span, offset, length, GetExportSizeBytes(), state.StructuredRepliesEnabled, NbdErrorInvalidArgument);
                     await WriteReplyAsync(stream, handle, NbdErrorInvalidArgument, cancellationToken);
                 }
             }
@@ -396,7 +406,30 @@ internal sealed class NbdEndpoint(VirtualDiskService virtualDiskService, ILogger
         }
 
         var exportSizeBytes = GetExportSizeBytes();
-        return offset >= 0 && length >= 0 && offset <= exportSizeBytes - length;
+        if (offset < 0 || length < 0 || exportSizeBytes < 0)
+        {
+            return false;
+        }
+
+        return (ulong)offset + (uint)length <= (ulong)exportSizeBytes;
+    }
+
+    private void LogReadFailure(NbdCommand command, ReadOnlySpan<byte> handle, long offset, int length, long exportSizeBytes, bool negotiatedStructuredReplies, uint errorCode)
+    {
+        if (command is not NbdCommand.Read)
+        {
+            return;
+        }
+
+        logger.LogDebug(
+            "NBD read failed command={Command} handle={Handle} offset={Offset} length={Length} exportSize={ExportSize} negotiatedStructuredReplies={StructuredReplies} errorCode={ErrorCode}",
+            command,
+            Convert.ToHexString(handle),
+            offset,
+            length,
+            exportSizeBytes,
+            negotiatedStructuredReplies,
+            errorCode);
     }
 
     private async Task SaveBestEffortAsync(CancellationToken cancellationToken)
